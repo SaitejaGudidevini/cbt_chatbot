@@ -1,0 +1,115 @@
+version: '3.8'
+
+services:
+  # Main CBT API Service
+  cbt-api:
+    build: .
+    container_name: cbt-api
+    ports:
+      - "8000:8000"
+    environment:
+      # API Configuration
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - LOG_LEVEL=INFO
+      
+      # Ollama Configuration
+      - USE_OLLAMA=true
+      - OLLAMA_MODEL=qwen2.5:14b-instruct
+      - OLLAMA_BASE_URL=http://ollama:11434
+      
+      # Optional: HuggingFace Configuration (if not using Ollama)
+      # - USE_OLLAMA=false
+      # - HF_ENDPOINT_URL=${HF_ENDPOINT_URL}
+      # - HF_API_TOKEN=${HF_API_TOKEN}
+      
+      # Optional: n8n Integration
+      - ENABLE_N8N=false
+      # - N8N_BASE_URL=http://n8n:5678
+      
+      # Database Configuration (if using PocketBase)
+      - POCKETBASE_URL=http://pocketbase:8090
+      - POCKETBASE_ENABLED=false
+    
+    volumes:
+      # Persist model files
+      - ./BinaryClassifier:/app/BinaryClassifier:ro
+      - ./RegressionEvaluation:/app/RegressionEvaluation:ro
+      - ./cbt_sequence_regressor:/app/cbt_sequence_regressor:ro
+      
+      # Persist logs and data
+      - ./logs:/app/logs
+      - ./data:/app/data
+    
+    depends_on:
+      - ollama
+    
+    restart: unless-stopped
+    
+    networks:
+      - cbt-network
+
+  # Ollama Service (for local LLM)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+    restart: unless-stopped
+    networks:
+      - cbt-network
+    # Automatically pull the model on startup
+    entrypoint: ["/bin/sh", "-c"]
+    command: 
+      - |
+        ollama serve &
+        sleep 5
+        ollama pull qwen2.5:14b-instruct
+        wait
+
+  # Optional: PocketBase for user management
+  # pocketbase:
+  #   image: spectado/pocketbase:latest
+  #   container_name: pocketbase
+  #   ports:
+  #     - "8090:8090"
+  #   volumes:
+  #     - ./pb_data:/pb/pb_data
+  #     - ./pb_migrations:/pb/pb_migrations
+  #   restart: unless-stopped
+  #   networks:
+  #     - cbt-network
+
+  # Optional: n8n for workflow automation
+  # n8n:
+  #   image: n8nio/n8n:latest
+  #   container_name: n8n
+  #   ports:
+  #     - "5678:5678"
+  #   environment:
+  #     - N8N_BASIC_AUTH_ACTIVE=true
+  #     - N8N_BASIC_AUTH_USER=admin
+  #     - N8N_BASIC_AUTH_PASSWORD=password
+  #     - N8N_HOST=0.0.0.0
+  #     - N8N_PORT=5678
+  #     - N8N_PROTOCOL=http
+  #     - NODE_ENV=production
+  #     - WEBHOOK_URL=http://n8n:5678/
+  #   volumes:
+  #     - n8n_data:/home/node/.n8n
+  #   restart: unless-stopped
+  #   networks:
+  #     - cbt-network
+
+volumes:
+  ollama_data:
+  # n8n_data:
+  # pocketbase_data:
+
+networks:
+  cbt-network:
+    driver: bridge

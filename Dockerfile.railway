@@ -1,0 +1,31 @@
+# Railway-optimized Dockerfile
+FROM python:3.9-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install only essential system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY . .
+
+# Railway sets PORT environment variable
+ENV PYTHONUNBUFFERED=1
+
+# Use Railway's PORT variable (default 8000 for local testing)
+ENV PORT=${PORT:-8000}
+
+# Expose port (Railway handles this automatically)
+EXPOSE ${PORT}
+
+# Start command that respects Railway's PORT
+CMD python app.py --port $PORT
