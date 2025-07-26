@@ -27,9 +27,9 @@ services:
       - ENABLE_N8N=false
       # - N8N_BASE_URL=http://n8n:5678
       
-      # Database Configuration (if using PocketBase)
+      # Database Configuration (using PocketBase)
       - POCKETBASE_URL=http://pocketbase:8090
-      - POCKETBASE_ENABLED=false
+      - POCKETBASE_ENABLED=true
     
     volumes:
       # Persist model files
@@ -43,6 +43,7 @@ services:
     
     depends_on:
       - ollama
+      - pocketbase
     
     restart: unless-stopped
     
@@ -71,18 +72,19 @@ services:
         ollama pull qwen2.5:14b-instruct
         wait
 
-  # Optional: PocketBase for user management
-  # pocketbase:
-  #   image: spectado/pocketbase:latest
-  #   container_name: pocketbase
-  #   ports:
-  #     - "8090:8090"
-  #   volumes:
-  #     - ./pb_data:/pb/pb_data
-  #     - ./pb_migrations:/pb/pb_migrations
-  #   restart: unless-stopped
-  #   networks:
-  #     - cbt-network
+  # PocketBase for user management
+  pocketbase:
+    image: ghcr.io/muchobien/pocketbase:latest
+    container_name: pocketbase
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./pb_data:/pb_data
+    environment:
+      - PB_ENCRYPTION_KEY=${PB_ENCRYPTION_KEY:-defaultencryptionkey}
+    restart: unless-stopped
+    networks:
+      - cbt-network
 
   # Optional: n8n for workflow automation
   # n8n:
@@ -108,7 +110,6 @@ services:
 volumes:
   ollama_data:
   # n8n_data:
-  # pocketbase_data:
 
 networks:
   cbt-network:
