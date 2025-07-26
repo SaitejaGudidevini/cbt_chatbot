@@ -7,6 +7,8 @@ import os
 import sys
 import logging
 import uvicorn
+import subprocess
+import time
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from fastapi import FastAPI, HTTPException, Query, Depends, Header
@@ -295,6 +297,18 @@ class ContextEngineeredCBTAPI:
                     detail="Failed to create collections"
                 )
         
+        # PocketBase Admin Access
+        @self.app.get('/pb-admin', tags=["Admin"])
+        async def pocketbase_admin_info():
+            """Get PocketBase admin access info"""
+            if os.getenv("POCKETBASE_ENABLED", "false").lower() == "true":
+                return {
+                    "message": "PocketBase is running",
+                    "local_admin": "http://localhost:8090/_/",
+                    "note": "On Railway, use PocketBase API endpoints directly as admin UI is not accessible"
+                }
+            return {"error": "PocketBase not enabled"}
+        
         @self.app.get('/database/health', tags=["Database"])
         async def database_health():
             """Check database connection health"""
@@ -536,6 +550,23 @@ def main():
     logger.info("🚀 Starting CBT API with AWS-ready configuration")
     logger.info(f"Environment: {config.get_environment_info()['environment']}")
     logger.info(f"Project Root: {config.project_root}")
+    
+    # Start PocketBase as subprocess if enabled
+    if os.getenv("POCKETBASE_ENABLED", "false").lower() == "true":
+        logger.info("Starting embedded PocketBase...")
+        try:
+            # Start PocketBase in background
+            subprocess.Popen([
+                "/usr/local/bin/pocketbase", 
+                "serve", 
+                "--http=0.0.0.0:8090",
+                "--dir=/app/pb_data"
+            ])
+            logger.info("PocketBase started on port 8090")
+            # Give PocketBase time to start
+            time.sleep(3)
+        except Exception as e:
+            logger.warning(f"Could not start embedded PocketBase: {e}")
     
     # Import and create app
     app = create_app()

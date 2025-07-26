@@ -8,7 +8,16 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
+    curl \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# Download and install PocketBase
+RUN curl -L https://github.com/pocketbase/pocketbase/releases/download/v0.20.0/pocketbase_0.20.0_linux_amd64.zip -o pocketbase.zip \
+    && unzip pocketbase.zip \
+    && chmod +x pocketbase \
+    && mv pocketbase /usr/local/bin/ \
+    && rm pocketbase.zip
 
 # Copy requirements first for better caching
 COPY requirements.txt .
@@ -29,8 +38,8 @@ ENV OLLAMA_MODEL=qwen2.5:14b-instruct
 ENV API_HOST=0.0.0.0
 ENV API_PORT=8000
 
-# Expose the port
-EXPOSE 8000
+# Expose ports (API and PocketBase admin)
+EXPOSE 8000 8090
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
