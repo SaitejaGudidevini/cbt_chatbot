@@ -38,12 +38,30 @@ ENV OLLAMA_MODEL=qwen2.5:14b-instruct
 ENV API_HOST=0.0.0.0
 ENV API_PORT=8000
 
-# Expose ports (API and PocketBase admin)
+# Expose both ports (API and PocketBase)
 EXPOSE 8000 8090
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python -c "import requests; requests.get('http://localhost:8000/health')" || exit 1
 
-# Run the application
-CMD ["python", "app.py"]
+# Create startup script inline
+RUN echo 'import subprocess\n\
+import time\n\
+import os\n\
+\n\
+# Start PocketBase in background\n\
+print("Starting PocketBase...")\n\
+pocketbase = subprocess.Popen(["/usr/local/bin/pocketbase", "serve", "--http=0.0.0.0:8090", "--dir=/app/pb_data"])\n\
+\n\
+# Wait for PocketBase to be ready\n\
+time.sleep(5)\n\
+print("PocketBase started on port 8090")\n\
+\n\
+# Start main app\n\
+print("Starting main application...")\n\
+import app\n\
+app.main()\n' > start_services.py
+
+# Run both services
+CMD ["python", "start_services.py"]

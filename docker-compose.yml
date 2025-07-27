@@ -43,7 +43,7 @@ services:
     
     depends_on:
       - ollama
-      - pocketbase
+      - pocketbase  # PocketBase runs as separate service
     
     restart: unless-stopped
     

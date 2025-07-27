@@ -7,8 +7,6 @@ import os
 import sys
 import logging
 import uvicorn
-import subprocess
-import time
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from fastapi import FastAPI, HTTPException, Query, Depends, Header
@@ -297,58 +295,6 @@ class ContextEngineeredCBTAPI:
                     detail="Failed to create collections"
                 )
         
-        # PocketBase Admin Access
-        @self.app.get('/pb-admin', tags=["Admin"])
-        async def pocketbase_admin_info():
-            """Get PocketBase admin access info"""
-            if os.getenv("POCKETBASE_ENABLED", "false").lower() == "true":
-                return {
-                    "message": "PocketBase is running",
-                    "local_admin": "http://localhost:8090/_/",
-                    "note": "On Railway, use PocketBase API endpoints directly as admin UI is not accessible"
-                }
-            return {"error": "PocketBase not enabled"}
-        
-        @self.app.post('/admin/create-first-admin', tags=["Admin"])
-        async def create_first_admin():
-            """Create initial admin account (ONE TIME USE - disable after first use)"""
-            # Check if this endpoint should be enabled
-            if os.getenv("ENABLE_ADMIN_CREATION", "false").lower() != "true":
-                raise HTTPException(
-                    status_code=403,
-                    detail="Admin creation endpoint disabled. Set ENABLE_ADMIN_CREATION=true to enable."
-                )
-            
-            # Create admin through PocketBase API
-            import httpx
-            async with httpx.AsyncClient() as client:
-                try:
-                    # Create admin account
-                    response = await client.post(
-                        "http://localhost:8090/api/admins",
-                        json={
-                            "email": os.getenv("ADMIN_EMAIL", "admin@example.com"),
-                            "password": os.getenv("ADMIN_PASSWORD", "adminPassword123!"),
-                            "passwordConfirm": os.getenv("ADMIN_PASSWORD", "adminPassword123!")
-                        }
-                    )
-                    
-                    if response.status_code == 200:
-                        return {
-                            "success": True,
-                            "message": "Admin created successfully",
-                            "email": os.getenv("ADMIN_EMAIL", "admin@example.com"),
-                            "warning": "DISABLE THIS ENDPOINT NOW by setting ENABLE_ADMIN_CREATION=false"
-                        }
-                    else:
-                        return {
-                            "success": False,
-                            "error": response.text,
-                            "status": response.status_code
-                        }
-                except Exception as e:
-                    logger.error(f"Failed to create admin: {e}")
-                    raise HTTPException(status_code=500, detail=str(e))
         
         @self.app.get('/database/health', tags=["Database"])
         async def database_health():
@@ -592,22 +538,6 @@ def main():
     logger.info(f"Environment: {config.get_environment_info()['environment']}")
     logger.info(f"Project Root: {config.project_root}")
     
-    # Start PocketBase as subprocess if enabled
-    if os.getenv("POCKETBASE_ENABLED", "false").lower() == "true":
-        logger.info("Starting embedded PocketBase...")
-        try:
-            # Start PocketBase in background
-            subprocess.Popen([
-                "/usr/local/bin/pocketbase", 
-                "serve", 
-                "--http=0.0.0.0:8090",
-                "--dir=/app/pb_data"
-            ])
-            logger.info("PocketBase started on port 8090")
-            # Give PocketBase time to start
-            time.sleep(3)
-        except Exception as e:
-            logger.warning(f"Could not start embedded PocketBase: {e}")
     
     # Import and create app
     app = create_app()
