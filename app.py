@@ -9,9 +9,10 @@ import logging
 import uvicorn
 from datetime import datetime
 from typing import Dict, List, Optional, Any
-from fastapi import FastAPI, HTTPException, Query, Depends, Header
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi import FastAPI, HTTPException, Query, Depends, Header, Request
+from fastapi.responses import JSONResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
+import httpx
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import json
 from pathlib import Path
@@ -386,6 +387,37 @@ class ContextEngineeredCBTAPI:
             except Exception as e:
                 logger.error(f"Classification error: {e}")
                 raise HTTPException(status_code=500, detail=str(e))
+        
+        # ========================================
+        # POCKETBASE PROXY
+        # ========================================
+        
+        @self.app.api_route("/pb/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"], include_in_schema=False)
+        async def pocketbase_proxy(request: Request, path: str):
+            """Proxy requests to PocketBase admin and API"""
+            async with httpx.AsyncClient() as client:
+                url = f"http://localhost:8090/{path}"
+                
+                # Get request body if present
+                body = await request.body() if request.method in ["POST", "PUT", "PATCH"] else None
+                
+                # Forward the request
+                response = await client.request(
+                    method=request.method,
+                    url=url,
+                    content=body,
+                    headers={
+                        key: value for key, value in request.headers.items()
+                        if key.lower() not in ["host", "content-length"]
+                    }
+                )
+                
+                # Return the response
+                return Response(
+                    content=response.content,
+                    status_code=response.status_code,
+                    headers=dict(response.headers)
+                )
         
         # ========================================
         # PROTECTED CBT CONVERSATION ENDPOINTS
