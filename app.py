@@ -10,7 +10,7 @@ import uvicorn
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from fastapi import FastAPI, HTTPException, Query, Depends, Header, Request
-from fastapi.responses import JSONResponse, HTMLResponse, Response
+from fastapi.responses import JSONResponse, HTMLResponse, Response, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -296,6 +296,11 @@ class ContextEngineeredCBTAPI:
                     detail="Failed to create collections"
                 )
         
+        
+        @self.app.get('/pocketbase', tags=["Admin"])
+        async def pocketbase_redirect():
+            """Redirect to PocketBase admin"""
+            return RedirectResponse(url="/pb/_/")
         
         @self.app.get('/pocketbase/status', tags=["Admin"])
         async def pocketbase_status():
