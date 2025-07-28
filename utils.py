@@ -225,7 +225,7 @@ if SQLALCHEMY_AVAILABLE:
         account_status = Column(String, default='active')
         created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
         last_login = Column(DateTime)
-        metadata = Column(JSON)
+        user_metadata = Column(JSON)
         
         conversations = relationship("DBConversation", back_populates="user", cascade="all, delete-orphan")
 
@@ -238,7 +238,7 @@ if SQLALCHEMY_AVAILABLE:
         ended_at = Column(DateTime)
         current_phase = Column(String, default='chit_chat')
         progress_scores = Column(JSON)
-        metadata = Column(JSON)
+        user_metadata = Column(JSON)
         
         user = relationship("DBUser", back_populates="conversations")
         messages = relationship("DBMessage", back_populates="conversation", cascade="all, delete-orphan")
