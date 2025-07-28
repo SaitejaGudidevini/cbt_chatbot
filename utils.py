@@ -1,6 +1,5 @@
 """
-Utils - Configuration and Models
-From: config/deployment_config.py + models.py
+Utils - Configuration and Models with PostgreSQL Support
 """
 
 import os
@@ -8,32 +7,19 @@ from pathlib import Path
 from typing import Dict, Optional, List, Any, Union
 import logging
 from pydantic import BaseModel, Field, EmailStr
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import asyncio
 import httpx
 import json
+import bcrypt
+import jwt
+import secrets
+import uuid
 
 logger = logging.getLogger(__name__)
 
 # ========================================
-# POCKETBASE IMPORTS AND TYPES
-# ========================================
-
-try:
-    from pocketbase import PocketBase
-    from pocketbase.models import Record
-    from pocketbase.client import ClientResponseError
-    POCKETBASE_AVAILABLE = True
-    logger.info("✅ PocketBase client available")
-except ImportError:
-    logger.warning("⚠️ PocketBase client not available. Install with: pip install pocketbase")
-    POCKETBASE_AVAILABLE = False
-    PocketBase = None
-    Record = None
-    ClientResponseError = Exception
-
-# ========================================
-# DEPLOYMENT CONFIGURATION (from config/deployment_config.py)
+# DEPLOYMENT CONFIGURATION
 # ========================================
 
 class DeploymentConfig:
@@ -52,16 +38,24 @@ class DeploymentConfig:
         self.model_paths = self._initialize_model_paths()
         self.api_config = self._initialize_api_config()
         
-        # Initialize PocketBase manager
-        self.pocketbase_manager = None
-        if POCKETBASE_AVAILABLE:
-            self.pocketbase_manager = PocketBaseManager(self.api_config)
+        # Initialize database managers
+        self.postgresql_available = self._check_postgresql()
         
         logger.info(f"🚀 CBT API Configuration:")
         logger.info(f"   Environment: {'AWS' if self.is_aws else 'Docker' if self.is_docker else 'Local'}")
         logger.info(f"   Project Root: {self.project_root}")
         logger.info(f"   Model Paths: {self.model_paths}")
-        logger.info(f"   PocketBase: {'Enabled' if self.pocketbase_manager else 'Disabled'}")
+        logger.info(f"   PostgreSQL: {'Available' if self.postgresql_available else 'Not configured'}")
+    
+    def _check_postgresql(self) -> bool:
+        """Check if PostgreSQL is available"""
+        try:
+            from sqlalchemy import create_engine
+            if os.getenv('DATABASE_URL'):
+                return True
+        except ImportError:
+            pass
+        return False
     
     def _is_aws_environment(self) -> bool:
         """Detect if running in AWS environment"""
@@ -88,7 +82,7 @@ class DeploymentConfig:
             return Path('/app')
         
         # 3. Local development: Find project root
-        current = Path(__file__).parent.parent  # Go up from config/ to CBT_context_engineering/
+        current = Path(__file__).parent.parent
         
         # Look for parent directory with cbt_api.py (original root)
         for parent in [current.parent] + list(current.parent.parents):
@@ -122,17 +116,16 @@ class DeploymentConfig:
         return {
             'ollama_base_url': os.environ.get('OLLAMA_BASE_URL', 'http://100.111.94.76:11434'),
             'ollama_model': os.environ.get('OLLAMA_MODEL', 'qwen2.5:14b-instruct'),
-            'n8n_base_url': os.environ.get('N8N_BASE_URL', None),  # Disabled by default
+            'n8n_base_url': os.environ.get('N8N_BASE_URL', None),
             'knowledge_graph_path': os.environ.get('KNOWLEDGE_GRAPH_PATH', 'cbt_knowledge_graph.json'),
             'max_token_budget': int(os.environ.get('MAX_TOKEN_BUDGET', '8192')),
             'log_level': os.environ.get('LOG_LEVEL', 'INFO'),
             'api_host': os.environ.get('API_HOST', '0.0.0.0'),
-            'api_port': int(os.environ.get('API_PORT', '4001')),
-            # PocketBase Configuration
-            'pocketbase_url': os.environ.get('POCKETBASE_URL', 'http://127.0.0.1:8090'),
-            'pocketbase_admin_email': os.environ.get('POCKETBASE_ADMIN_EMAIL', 'admin@cbtapi.com'),
-            'pocketbase_admin_password': os.environ.get('POCKETBASE_ADMIN_PASSWORD', 'admin123456'),
-            'pocketbase_auto_create_collections': os.environ.get('POCKETBASE_AUTO_CREATE_COLLECTIONS', 'true').lower() == 'true',
+            'api_port': int(os.environ.get('API_PORT', '8000')),
+            # JWT Configuration
+            'jwt_secret': os.environ.get('JWT_SECRET', secrets.token_urlsafe(32)),
+            'jwt_algorithm': os.environ.get('JWT_ALGORITHM', 'HS256'),
+            'jwt_expiration_hours': int(os.environ.get('JWT_EXPIRATION_HOURS', '24')),
         }
     
     def get_model_path(self, model_name: str) -> Path:
@@ -172,378 +165,335 @@ class DeploymentConfig:
             'path_validation': self.validate_paths(),
             'python_path': os.environ.get('PYTHONPATH', ''),
             'working_directory': str(Path.cwd()),
-            'pocketbase_enabled': self.pocketbase_manager is not None,
+            'postgresql_available': self.postgresql_available,
         }
 
 # ========================================
-# POCKETBASE DATABASE MANAGER
+# POSTGRESQL DATABASE SUPPORT
 # ========================================
 
-class PocketBaseManager:
-    """Manages PocketBase database operations for CBT API"""
-    
-    def __init__(self, api_config: Dict[str, str]):
-        if not POCKETBASE_AVAILABLE:
-            raise ImportError("PocketBase client not available. Install with: pip install pocketbase")
+try:
+    from sqlalchemy import create_engine, Column, String, Text, DateTime, JSON, Boolean, Float, ForeignKey
+    from sqlalchemy.ext.declarative import declarative_base
+    from sqlalchemy.orm import sessionmaker, relationship, Session
+    from sqlalchemy.pool import NullPool
+    SQLALCHEMY_AVAILABLE = True
+    logger.info("✅ SQLAlchemy available for PostgreSQL")
+except ImportError:
+    logger.warning("⚠️ SQLAlchemy not available. Install with: pip install sqlalchemy psycopg2-binary")
+    SQLALCHEMY_AVAILABLE = False
+    Base = None
+
+# PostgreSQL Configuration
+DATABASE_URL = os.getenv('DATABASE_URL')
+if DATABASE_URL and DATABASE_URL.startswith('postgres://'):
+    DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
+
+# Create SQLAlchemy components if available
+if SQLALCHEMY_AVAILABLE and DATABASE_URL:
+    try:
+        engine = create_engine(DATABASE_URL, poolclass=NullPool, echo=False)
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        Base = declarative_base()
+        logger.info("✅ PostgreSQL connection configured")
+    except Exception as e:
+        logger.error(f"❌ Failed to configure PostgreSQL: {e}")
+        engine = None
+        SessionLocal = None
+        Base = declarative_base() if SQLALCHEMY_AVAILABLE else None
+else:
+    engine = None
+    SessionLocal = None
+    if SQLALCHEMY_AVAILABLE:
+        Base = declarative_base()
+
+# Database Models (only if SQLAlchemy is available)
+if SQLALCHEMY_AVAILABLE:
+    class DBUser(Base):
+        __tablename__ = 'db_users'
         
-        self.url = api_config.get('pocketbase_url')
-        self.admin_email = api_config.get('pocketbase_admin_email')
-        self.admin_password = api_config.get('pocketbase_admin_password')
-        self.auto_create_collections = api_config.get('pocketbase_auto_create_collections', True)
+        id = Column(String, primary_key=True)
+        email = Column(String, unique=True, nullable=False)
+        username = Column(String, unique=True)
+        password_hash = Column(String, nullable=False)
+        first_name = Column(String)
+        last_name = Column(String)
+        date_of_birth = Column(String)
+        phone = Column(String)
+        emergency_contact = Column(JSON)
+        preferences = Column(JSON)
+        account_status = Column(String, default='active')
+        created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+        last_login = Column(DateTime)
+        metadata = Column(JSON)
         
-        # Initialize PocketBase client
-        self.pb = PocketBase(self.url)
-        self._initialized = False
+        conversations = relationship("DBConversation", back_populates="user", cascade="all, delete-orphan")
+
+    class DBConversation(Base):
+        __tablename__ = 'db_conversations'
         
-        logger.info(f"🗄️ PocketBase Manager initialized - URL: {self.url}")
-    
-    async def initialize(self) -> bool:
-        """Initialize PocketBase connection and collections"""
-        try:
-            # Authenticate as admin
-            await self._authenticate_admin()
-            
-            # Create collections if needed
-            if self.auto_create_collections:
-                await self._create_collections()
-            
-            self._initialized = True
-            logger.info("✅ PocketBase initialized successfully")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize PocketBase: {e}")
-            return False
-    
-    async def _authenticate_admin(self):
-        """Authenticate as admin user"""
-        try:
-            self.pb.admins.auth_with_password(self.admin_email, self.admin_password)
-            logger.info("✅ PocketBase admin authentication successful")
-        except Exception as e:
-            logger.error(f"❌ PocketBase admin authentication failed: {e}")
-            raise
-    
-    async def _create_collections(self):
-        """Create necessary collections for CBT API"""
-        try:
-            # Users collection schema
-            users_schema = {
-                "name": "users",
-                "type": "auth",
-                "schema": [
-                    {
-                        "name": "first_name",
-                        "type": "text",
-                        "required": True,
-                    },
-                    {
-                        "name": "last_name", 
-                        "type": "text",
-                        "required": True,
-                    },
-                    {
-                        "name": "date_of_birth",
-                        "type": "date",
-                        "required": False,
-                    },
-                    {
-                        "name": "phone",
-                        "type": "text",
-                        "required": False,
-                    },
-                    {
-                        "name": "emergency_contact",
-                        "type": "json",
-                        "required": False,
-                    },
-                    {
-                        "name": "preferences",
-                        "type": "json",
-                        "required": False,
-                    },
-                    {
-                        "name": "account_status",
-                        "type": "select",
-                        "required": True,
-                        "options": {
-                            "values": ["active", "inactive", "suspended", "pending_verification"]
-                        }
-                    }
-                ],
-                "options": {
-                    "allowEmailAuth": True,
-                    "allowUsernameAuth": False,
-                    "allowOAuth2Auth": False,
-                    "requireEmail": True,
-                    "exceptEmailDomains": [],
-                    "onlyEmailDomains": [],
-                    "minPasswordLength": 8
-                }
-            }
-            
-            # Try to create users collection
-            try:
-                self.pb.collections.create(users_schema)
-                logger.info("✅ Created 'users' collection")
-            except ClientResponseError as e:
-                if "already exists" in str(e).lower():
-                    logger.info("ℹ️ 'users' collection already exists")
-                else:
-                    raise
-            
-            # Conversations collection schema
-            conversations_schema = {
-                "name": "conversations",
-                "type": "base",
-                "schema": [
-                    {
-                        "name": "user_id",
-                        "type": "text",
-                        "required": True,
-                        "options": {
-                            "min": 1,
-                            "max": 50,
-                            "pattern": ""
-                        }
-                    },
-                    {
-                        "name": "conversation_data",
-                        "type": "json",
-                        "required": True,
-                    },
-                    {
-                        "name": "phase",
-                        "type": "text",
-                        "required": True,
-                    },
-                    {
-                        "name": "status",
-                        "type": "select",
-                        "required": True,
-                        "options": {
-                            "values": ["active", "completed", "paused", "archived"]
-                        }
-                    },
-                    {
-                        "name": "last_activity",
-                        "type": "date",
-                        "required": True,
-                    }
-                ]
-            }
-            
-            try:
-                self.pb.collections.create(conversations_schema)
-                logger.info("✅ Created 'conversations' collection")
-            except ClientResponseError as e:
-                if "already exists" in str(e).lower():
-                    logger.info("ℹ️ 'conversations' collection already exists")
-                else:
-                    raise
-                    
-        except Exception as e:
-            logger.error(f"❌ Failed to create collections: {e}")
-            raise
-    
-    async def signup_user(self, user_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Sign up a new user"""
-        if not self._initialized:
-            await self.initialize()
+        id = Column(String, primary_key=True)
+        user_id = Column(String, ForeignKey('db_users.id'), nullable=False)
+        started_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+        ended_at = Column(DateTime)
+        current_phase = Column(String, default='chit_chat')
+        progress_scores = Column(JSON)
+        metadata = Column(JSON)
         
-        try:
-            # Create user record
-            user_record = self.pb.collection('users').create({
-                'email': user_data['email'],
-                'password': user_data['password'],
-                'passwordConfirm': user_data['password'],
-                'first_name': user_data.get('first_name', ''),
-                'last_name': user_data.get('last_name', ''),
-                'date_of_birth': user_data.get('date_of_birth'),
-                'phone': user_data.get('phone'),
-                'emergency_contact': user_data.get('emergency_contact'),
-                'preferences': user_data.get('preferences', {}),
-                'account_status': 'pending_verification'
-            })
-            
-            logger.info(f"✅ User created successfully: {user_record.id}")
-            
-            return {
-                'success': True,
-                'user_id': user_record.id,
-                'email': user_data['email'],  # Use input data instead of record
-                'message': 'User created successfully'
-            }
-            
-        except ClientResponseError as e:
-            logger.error(f"❌ User signup failed: {e}")
-            return {
-                'success': False,
-                'error': str(e),
-                'message': 'Failed to create user account'
-            }
-    
-    async def login_user(self, email: str, password: str) -> Dict[str, Any]:
-        """Authenticate user login"""
-        if not self._initialized:
-            await self.initialize()
+        user = relationship("DBUser", back_populates="conversations")
+        messages = relationship("DBMessage", back_populates="conversation", cascade="all, delete-orphan")
+
+    class DBMessage(Base):
+        __tablename__ = 'db_messages'
         
-        try:
-            # Authenticate user
-            auth_data = self.pb.collection('users').auth_with_password(email, password)
-            
-            # Access user data through authStore.model
-            user_model = self.pb.auth_store.model
-            
-            logger.info(f"✅ User login successful: {user_model.id}")
-            
-            return {
-                'success': True,
-                'user_id': user_model.id,
-                'email': user_model.email,
-                'token': auth_data.token,
-                'user_data': {
-                    'first_name': getattr(user_model, 'first_name', ''),
-                    'last_name': getattr(user_model, 'last_name', ''),
-                    'account_status': getattr(user_model, 'account_status', 'active')
-                },
-                'message': 'Login successful'
-            }
-            
-        except ClientResponseError as e:
-            logger.error(f"❌ User login failed: {e}")
-            return {
-                'success': False,
-                'error': str(e),
-                'message': 'Invalid email or password'
-            }
-    
-    async def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
-        """Get user by ID"""
-        if not self._initialized:
-            await self.initialize()
+        id = Column(String, primary_key=True)
+        conversation_id = Column(String, ForeignKey('db_conversations.id'), nullable=False)
+        timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+        role = Column(String, nullable=False)  # 'user' or 'assistant'
+        content = Column(Text, nullable=False)
+        phase = Column(String)
+        is_cbt_trigger = Column(Boolean, default=False)
+        trigger_confidence = Column(Float)
         
-        try:
-            user_record = self.pb.collection('users').get_one(user_id)
-            return {
-                'id': user_record.id,
-                'email': user_record.email,
-                'first_name': getattr(user_record, 'first_name', ''),
-                'last_name': getattr(user_record, 'last_name', ''),
-                'account_status': getattr(user_record, 'account_status', 'active'),
-                'created': user_record.created,
-                'updated': user_record.updated
-            }
-        except ClientResponseError:
-            return None
-    
-    async def save_conversation(self, user_id: str, conversation_data: Dict[str, Any]) -> bool:
-        """Save conversation data to database"""
-        if not self._initialized:
-            await self.initialize()
+        conversation = relationship("DBConversation", back_populates="messages")
+
+    # Authentication and Database Manager
+    class PostgreSQLManager:
+        """Manager for PostgreSQL database operations with authentication"""
         
-        try:
-            self.pb.collection('conversations').create({
+        @staticmethod
+        def init_db():
+            """Initialize database tables"""
+            if engine:
+                Base.metadata.create_all(bind=engine)
+                logger.info("✅ PostgreSQL tables created successfully")
+            else:
+                logger.warning("⚠️ No PostgreSQL connection available")
+        
+        @staticmethod
+        def get_db():
+            """Get database session"""
+            if SessionLocal:
+                db = SessionLocal()
+                try:
+                    yield db
+                finally:
+                    db.close()
+            else:
+                yield None
+        
+        @staticmethod
+        def hash_password(password: str) -> str:
+            """Hash a password using bcrypt"""
+            return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        
+        @staticmethod
+        def verify_password(password: str, hashed: str) -> bool:
+            """Verify a password against a hash"""
+            return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+        
+        @staticmethod
+        def generate_jwt_token(user_id: str, email: str, config: DeploymentConfig) -> str:
+            """Generate JWT token for user"""
+            expiration = datetime.now(timezone.utc) + timedelta(hours=config.get_api_config('jwt_expiration_hours'))
+            payload = {
                 'user_id': user_id,
-                'conversation_data': conversation_data,
-                'phase': conversation_data.get('phase', 'chit_chat'),
-                'status': 'active',
-                'last_activity': datetime.now().isoformat()
-            })
-            return True
-        except Exception as e:
-            logger.error(f"❌ Failed to save conversation: {e}")
-            return False
-    
-    async def ensure_conversations_collection(self) -> bool:
-        """Ensure conversations collection exists - can be called manually"""
-        try:
-            # Try to get the collection first
+                'email': email,
+                'exp': expiration,
+                'iat': datetime.now(timezone.utc)
+            }
+            return jwt.encode(payload, config.get_api_config('jwt_secret'), algorithm=config.get_api_config('jwt_algorithm'))
+        
+        @staticmethod
+        def decode_jwt_token(token: str, config: DeploymentConfig) -> Optional[Dict[str, Any]]:
+            """Decode and verify JWT token"""
             try:
-                self.pb.collections.get_one('conversations')
-                logger.info("✅ Conversations collection already exists")
-                return True
-            except:
-                # Collection doesn't exist, create it
-                pass
-            
-            # Create the collection
-            conversations_schema = {
-                "name": "conversations",
-                "type": "base",
-                "schema": [
-                    {
-                        "name": "user_id",
-                        "type": "text",
-                        "required": True,
-                        "options": {
-                            "min": 1,
-                            "max": 50,
-                            "pattern": ""
-                        }
-                    },
-                    {
-                        "name": "conversation_data",
-                        "type": "json",
-                        "required": True,
-                    },
-                    {
-                        "name": "phase",
-                        "type": "text",
-                        "required": True,
-                    },
-                    {
-                        "name": "status",
-                        "type": "select",
-                        "required": True,
-                        "options": {
-                            "values": ["active", "completed", "archived"]
-                        }
-                    },
-                    {
-                        "name": "last_activity",
-                        "type": "date",
-                        "required": True,
+                payload = jwt.decode(token, config.get_api_config('jwt_secret'), algorithms=[config.get_api_config('jwt_algorithm')])
+                return payload
+            except jwt.ExpiredSignatureError:
+                logger.warning("JWT token expired")
+                return None
+            except jwt.InvalidTokenError:
+                logger.warning("Invalid JWT token")
+                return None
+        
+        @staticmethod
+        async def signup_user(db: Session, user_data: Dict[str, Any], config: DeploymentConfig) -> Dict[str, Any]:
+            """Sign up a new user"""
+            try:
+                # Check if user already exists
+                existing_user = db.query(DBUser).filter(DBUser.email == user_data['email']).first()
+                if existing_user:
+                    return {
+                        'success': False,
+                        'message': 'User with this email already exists'
                     }
-                ],
-                "listRule": "user_id = @request.auth.id",
-                "viewRule": "user_id = @request.auth.id",
-                "createRule": "",
-                "updateRule": "user_id = @request.auth.id",
-                "deleteRule": "user_id = @request.auth.id"
-            }
-            
-            self.pb.collections.create(conversations_schema)
-            logger.info("✅ Created conversations collection successfully")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to ensure conversations collection: {e}")
-            return False
-    
-    async def health_check(self) -> Dict[str, Any]:
-        """Check PocketBase connection health"""
-        try:
-            # Simple health check by making a request to the API
-            async with httpx.AsyncClient() as client:
-                response = await client.get(f"{self.url}/api/health")
+                
+                # Create new user
+                user_id = str(uuid.uuid4())
+                hashed_password = PostgreSQLManager.hash_password(user_data['password'])
+                
+                new_user = DBUser(
+                    id=user_id,
+                    email=user_data['email'],
+                    password_hash=hashed_password,
+                    first_name=user_data.get('first_name', ''),
+                    last_name=user_data.get('last_name', ''),
+                    date_of_birth=user_data.get('date_of_birth'),
+                    phone=user_data.get('phone'),
+                    emergency_contact=user_data.get('emergency_contact'),
+                    preferences=user_data.get('preferences', {}),
+                    account_status='active'
+                )
+                
+                db.add(new_user)
+                db.commit()
+                db.refresh(new_user)
+                
+                # Generate JWT token
+                token = PostgreSQLManager.generate_jwt_token(user_id, user_data['email'], config)
+                
+                logger.info(f"✅ User created successfully: {user_id}")
+                
                 return {
-                    'status': 'healthy' if response.status_code == 200 else 'unhealthy',
-                    'url': self.url,
-                    'response_code': response.status_code
+                    'success': True,
+                    'user_id': user_id,
+                    'email': user_data['email'],
+                    'token': token,
+                    'message': 'User created successfully'
                 }
+                
+            except Exception as e:
+                logger.error(f"❌ User signup failed: {e}")
+                db.rollback()
+                return {
+                    'success': False,
+                    'error': str(e),
+                    'message': 'Failed to create user account'
+                }
+        
+        @staticmethod
+        async def login_user(db: Session, email: str, password: str, config: DeploymentConfig) -> Dict[str, Any]:
+            """Authenticate user login"""
+            try:
+                # Find user by email
+                user = db.query(DBUser).filter(DBUser.email == email).first()
+                
+                if not user:
+                    return {
+                        'success': False,
+                        'message': 'Invalid email or password'
+                    }
+                
+                # Verify password
+                if not PostgreSQLManager.verify_password(password, user.password_hash):
+                    return {
+                        'success': False,
+                        'message': 'Invalid email or password'
+                    }
+                
+                # Update last login
+                user.last_login = datetime.now(timezone.utc)
+                db.commit()
+                
+                # Generate JWT token
+                token = PostgreSQLManager.generate_jwt_token(user.id, user.email, config)
+                
+                logger.info(f"✅ User login successful: {user.id}")
+                
+                return {
+                    'success': True,
+                    'user_id': user.id,
+                    'email': user.email,
+                    'token': token,
+                    'user_data': {
+                        'first_name': user.first_name or '',
+                        'last_name': user.last_name or '',
+                        'account_status': user.account_status
+                    },
+                    'message': 'Login successful'
+                }
+                
+            except Exception as e:
+                logger.error(f"❌ User login failed: {e}")
+                return {
+                    'success': False,
+                    'error': str(e),
+                    'message': 'Login failed'
+                }
+        
+        @staticmethod
+        async def get_user_by_id(db: Session, user_id: str) -> Optional[Dict[str, Any]]:
+            """Get user by ID"""
+            try:
+                user = db.query(DBUser).filter(DBUser.id == user_id).first()
+                if user:
+                    return {
+                        'id': user.id,
+                        'email': user.email,
+                        'first_name': user.first_name or '',
+                        'last_name': user.last_name or '',
+                        'account_status': user.account_status,
+                        'created': user.created_at.isoformat(),
+                        'updated': user.last_login.isoformat() if user.last_login else None
+                    }
+                return None
+            except Exception as e:
+                logger.error(f"Failed to get user: {e}")
+                return None
+        
+        @staticmethod
+        def save_conversation_to_db(db: Session, conversation_id: str, user_id: str, phase: str = 'chit_chat'):
+            """Save a new conversation to PostgreSQL"""
+            if not db:
+                return None
+            
+            try:
+                conv = DBConversation(id=conversation_id, user_id=user_id, current_phase=phase)
+                db.add(conv)
+                db.commit()
+                db.refresh(conv)
+                return conv
+            except Exception as e:
+                logger.error(f"Failed to save conversation: {e}")
+                db.rollback()
+                return None
+        
+        @staticmethod
+        def save_message_to_db(db: Session, message_id: str, conversation_id: str, role: str, content: str, phase: str = None):
+            """Save a message to PostgreSQL"""
+            if not db:
+                return None
+            
+            try:
+                msg = DBMessage(
+                    id=message_id,
+                    conversation_id=conversation_id,
+                    role=role,
+                    content=content,
+                    phase=phase
+                )
+                db.add(msg)
+                db.commit()
+                db.refresh(msg)
+                return msg
+            except Exception as e:
+                logger.error(f"Failed to save message: {e}")
+                db.rollback()
+                return None
+
+    # Initialize tables on startup if PostgreSQL is available
+    if engine:
+        try:
+            PostgreSQLManager.init_db()
         except Exception as e:
-            return {
-                'status': 'unhealthy',
-                'url': self.url,
-                'error': str(e)
-            }
+            logger.error(f"Failed to initialize PostgreSQL tables: {e}")
 
 # Global configuration instance
 config = DeploymentConfig()
 
 # ========================================
-# PYDANTIC MODELS (from models.py)
+# PYDANTIC MODELS
 # ========================================
 
 # User Authentication Models
@@ -577,7 +527,7 @@ class UserProfileResponse(BaseModel):
     last_name: str
     account_status: str
     created: str
-    updated: str
+    updated: Optional[str] = None
 
 # Existing CBT API Models
 class StartConversationResponse(BaseModel):

@@ -28,8 +28,11 @@ flask>=2.3.0
 jinja2>=3.1.0
 
 # Database and Authentication
-pocketbase>=0.15.0  # PocketBase Python client
 email-validator>=2.1.0  # For email validation in Pydantic
+sqlalchemy>=2.0.0  # SQL toolkit and ORM
+psycopg2-binary>=2.9.0  # PostgreSQL adapter
+bcrypt>=4.0.0  # For password hashing
+pyjwt>=2.8.0  # For JWT token generation
 
 # Utility libraries
 python-dotenv>=1.0.0

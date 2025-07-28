@@ -44,35 +44,32 @@ security = HTTPBearer()
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """
     Dependency to get current user from JWT token
-    This is a simplified version - in production you'd validate the JWT properly
     """
-    if not config.pocketbase_manager:
+    if not config.postgresql_available:
         raise HTTPException(
             status_code=503,
-            detail="Authentication not available. Database required."
+            detail="Authentication not available. PostgreSQL required."
         )
     
     token = credentials.credentials
     
-    # For now, we'll do a simple token validation
-    # In production, you'd decode and verify the JWT token properly
     if not token:
         raise HTTPException(
             status_code=401,
             detail="Invalid authentication token"
         )
     
-    # TODO: Add proper JWT validation here
-    # For now, we'll extract user_id from token (simplified)
-    try:
-        # This is a placeholder - you'd normally decode the JWT
-        # For testing, we can pass user_id directly in the token
-        return {"user_id": token, "authenticated": True}
-    except Exception as e:
+    # Decode JWT token
+    from utils import PostgreSQLManager
+    payload = PostgreSQLManager.decode_jwt_token(token, config)
+    
+    if not payload:
         raise HTTPException(
             status_code=401,
             detail="Invalid or expired token"
         )
+    
+    return {"user_id": payload['user_id'], "email": payload['email'], "authenticated": True}
 
 class ContextEngineeredCBTAPI:
     """
@@ -168,13 +165,13 @@ class ContextEngineeredCBTAPI:
                 "version": "2.1.0",
                 "status": "operational",
                 "environment": config.get_environment_info()['environment'],
-                "authentication_required": config.pocketbase_manager is not None,
+                "authentication_required": config.postgresql_available,
                 "features": {
                     "original_cbt_logic": True,
                     "context_engineering": True,
                     "knowledge_graph": True,
                     "n8n_integration": self.enable_n8n,
-                    "pocketbase_auth": config.pocketbase_manager is not None
+                    "postgresql_auth": config.postgresql_available
                 },
                 "endpoints": {
                     "public": ["/", "/health", "/auth/signup", "/auth/login", "/database/health"],
@@ -191,10 +188,15 @@ class ContextEngineeredCBTAPI:
                     "service": "Context Engineered CBT API"
                 }
                 
-                # Add PocketBase health check if available
-                if config.pocketbase_manager:
-                    pb_health = await config.pocketbase_manager.health_check()
-                    health_data["database"] = pb_health
+                # Add PostgreSQL health check if available
+                if config.postgresql_available:
+                    from utils import engine
+                    try:
+                        with engine.connect() as conn:
+                            conn.execute("SELECT 1")
+                            health_data["database"] = "PostgreSQL: healthy"
+                    except Exception as e:
+                        health_data["database"] = f"PostgreSQL: unhealthy - {str(e)}"
                 
                 return HealthResponse(**health_data)
             except Exception as e:
@@ -208,14 +210,19 @@ class ContextEngineeredCBTAPI:
         @self.app.post('/auth/signup', response_model=UserAuthResponse, tags=["Authentication"])
         async def signup_user(request: UserSignupRequest):
             """Sign up a new user with email and password"""
-            if not config.pocketbase_manager:
+            if not config.postgresql_available:
                 raise HTTPException(
                     status_code=503, 
-                    detail="Database not available. PocketBase is required for user authentication."
+                    detail="Database not available. PostgreSQL is required for user authentication."
                 )
             
             try:
-                result = await config.pocketbase_manager.signup_user(request.model_dump())
+                from utils import PostgreSQLManager, SessionLocal
+                db = next(PostgreSQLManager.get_db())
+                if not db:
+                    raise HTTPException(status_code=503, detail="Database connection unavailable")
+                
+                result = await PostgreSQLManager.signup_user(db, request.model_dump(), config)
                 
                 if result['success']:
                     logger.info(f"✅ User signup successful: {result['email']}")
@@ -224,6 +231,8 @@ class ContextEngineeredCBTAPI:
                     logger.warning(f"⚠️ User signup failed: {result['message']}")
                     raise HTTPException(status_code=400, detail=result['message'])
                     
+            except HTTPException:
+                raise
             except Exception as e:
                 logger.error(f"❌ Signup error: {e}")
                 raise HTTPException(status_code=500, detail="Internal server error during signup")
@@ -231,14 +240,19 @@ class ContextEngineeredCBTAPI:
         @self.app.post('/auth/login', response_model=UserAuthResponse, tags=["Authentication"])
         async def login_user(request: UserLoginRequest):
             """Login user with email and password"""
-            if not config.pocketbase_manager:
+            if not config.postgresql_available:
                 raise HTTPException(
                     status_code=503, 
-                    detail="Database not available. PocketBase is required for user authentication."
+                    detail="Database not available. PostgreSQL is required for user authentication."
                 )
             
             try:
-                result = await config.pocketbase_manager.login_user(request.email, request.password)
+                from utils import PostgreSQLManager, SessionLocal
+                db = next(PostgreSQLManager.get_db())
+                if not db:
+                    raise HTTPException(status_code=503, detail="Database connection unavailable")
+                
+                result = await PostgreSQLManager.login_user(db, request.email, request.password, config)
                 
                 if result['success']:
                     logger.info(f"✅ User login successful: {result['email']}")
@@ -247,6 +261,8 @@ class ContextEngineeredCBTAPI:
                     logger.warning(f"⚠️ User login failed: {result['message']}")
                     raise HTTPException(status_code=401, detail=result['message'])
                     
+            except HTTPException:
+                raise
             except Exception as e:
                 logger.error(f"❌ Login error: {e}")
                 raise HTTPException(status_code=500, detail="Internal server error during login")
@@ -258,14 +274,19 @@ class ContextEngineeredCBTAPI:
         @self.app.get('/auth/profile/{user_id}', response_model=UserProfileResponse, tags=["Authentication"])
         async def get_user_profile(user_id: str, current_user: dict = Depends(get_current_user)):
             """Get user profile by ID (Protected)"""
-            if not config.pocketbase_manager:
+            if not config.postgresql_available:
                 raise HTTPException(
                     status_code=503, 
-                    detail="Database not available. PocketBase is required for user authentication."
+                    detail="Database not available. PostgreSQL is required for user authentication."
                 )
             
             try:
-                user_data = await config.pocketbase_manager.get_user_by_id(user_id)
+                from utils import PostgreSQLManager, SessionLocal
+                db = next(PostgreSQLManager.get_db())
+                if not db:
+                    raise HTTPException(status_code=503, detail="Database connection unavailable")
+                
+                user_data = await PostgreSQLManager.get_user_by_id(db, user_id)
                 
                 if user_data:
                     return UserProfileResponse(**user_data)
@@ -278,60 +299,44 @@ class ContextEngineeredCBTAPI:
                 logger.error(f"❌ Get profile error: {e}")
                 raise HTTPException(status_code=500, detail="Internal server error")
         
-        @self.app.post('/database/setup-collections', tags=["Admin"])
-        async def setup_collections():
-            """Manually create PocketBase collections (admin only)"""
-            if not config.pocketbase_manager:
+        @self.app.post('/database/init', tags=["Admin"])
+        async def init_database():
+            """Initialize PostgreSQL database tables (admin only)"""
+            if not config.postgresql_available:
                 raise HTTPException(
                     status_code=503,
-                    detail="PocketBase not configured"
+                    detail="PostgreSQL not configured"
                 )
             
-            success = await config.pocketbase_manager.ensure_conversations_collection()
-            if success:
-                return {"message": "Collections created successfully"}
-            else:
+            try:
+                from utils import PostgreSQLManager
+                PostgreSQLManager.init_db()
+                return {"message": "Database tables initialized successfully"}
+            except Exception as e:
                 raise HTTPException(
                     status_code=500,
-                    detail="Failed to create collections"
+                    detail=f"Failed to initialize database: {str(e)}"
                 )
         
         
-        @self.app.get('/pocketbase', tags=["Admin"])
-        async def pocketbase_redirect():
-            """Redirect to PocketBase admin"""
-            return RedirectResponse(url="/pb/_/")
-        
-        @self.app.get('/pocketbase/status', tags=["Admin"])
-        async def pocketbase_status():
-            """Check if PocketBase is running"""
-            try:
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    response = await client.get("http://localhost:8090/api/health")
-                    return {
-                        "pocketbase_running": True,
-                        "status_code": response.status_code,
-                        "message": "PocketBase is accessible"
-                    }
-            except Exception as e:
-                return {
-                    "pocketbase_running": False,
-                    "error": str(e),
-                    "message": "Cannot connect to PocketBase on port 8090"
-                }
         
         @self.app.get('/database/health', tags=["Database"])
         async def database_health():
             """Check database connection health"""
-            if not config.pocketbase_manager:
+            if not config.postgresql_available:
                 return {
                     "status": "unavailable",
-                    "message": "PocketBase manager not initialized"
+                    "message": "PostgreSQL not configured"
                 }
             
             try:
-                health_data = await config.pocketbase_manager.health_check()
-                return health_data
+                from utils import engine
+                with engine.connect() as conn:
+                    conn.execute("SELECT 1")
+                    return {
+                        "status": "healthy",
+                        "message": "PostgreSQL connection successful"
+                    }
             except Exception as e:
                 logger.error(f"❌ Database health check failed: {e}")
                 return {
@@ -411,51 +416,6 @@ class ContextEngineeredCBTAPI:
                 logger.error(f"Classification error: {e}")
                 raise HTTPException(status_code=500, detail=str(e))
         
-        # ========================================
-        # POCKETBASE PROXY
-        # ========================================
-        
-        @self.app.api_route("/pb/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"], include_in_schema=False)
-        async def pocketbase_proxy(request: Request, path: str):
-            """Proxy requests to PocketBase admin and API"""
-            try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    url = f"http://localhost:8090/{path}"
-                    
-                    # Get request body if present
-                    body = await request.body() if request.method in ["POST", "PUT", "PATCH"] else None
-                    
-                    # Forward the request
-                    response = await client.request(
-                        method=request.method,
-                        url=url,
-                        content=body,
-                        headers={
-                            key: value for key, value in request.headers.items()
-                            if key.lower() not in ["host", "content-length"]
-                        }
-                    )
-                    
-                    # Return the response
-                    return Response(
-                        content=response.content,
-                        status_code=response.status_code,
-                        headers=dict(response.headers)
-                    )
-            except httpx.ConnectError:
-                return HTMLResponse(
-                    content="""
-                    <h2>PocketBase Connection Error</h2>
-                    <p>Could not connect to PocketBase. This might be because:</p>
-                    <ul>
-                        <li>PocketBase is still starting up (wait a few seconds)</li>
-                        <li>PocketBase failed to start (check logs)</li>
-                        <li>Running in development without PocketBase</li>
-                    </ul>
-                    <p>Check the application logs for more details.</p>
-                    """,
-                    status_code=503
-                )
         
         # ========================================
         # PROTECTED CBT CONVERSATION ENDPOINTS
@@ -485,16 +445,21 @@ class ContextEngineeredCBTAPI:
                 # Generate initial response
                 initial_response = "Hello! I'm here to support you through our conversation today. How are you feeling?"
                 
-                # Save conversation to database if possible
-                if config.pocketbase_manager:
-                    await config.pocketbase_manager.save_conversation(
-                        authenticated_user_id, 
-                        {
-                            "conversation_id": conversation_id,
-                            "phase": "chit_chat",
-                            "initial_response": initial_response
-                        }
-                    )
+                # Save conversation to PostgreSQL if available
+                if config.postgresql_available:
+                    from utils import PostgreSQLManager
+                    import uuid
+                    db = next(PostgreSQLManager.get_db())
+                    if db:
+                        PostgreSQLManager.save_conversation_to_db(db, conversation_id, authenticated_user_id)
+                        PostgreSQLManager.save_message_to_db(
+                            db, 
+                            str(uuid.uuid4()), 
+                            conversation_id, 
+                            'assistant', 
+                            initial_response, 
+                            'chit_chat'
+                        )
                 
                 logger.info(f"✅ Started conversation {conversation_id} for user {authenticated_user_id}")
                 
@@ -527,18 +492,30 @@ class ContextEngineeredCBTAPI:
                     llm_client=self.enhanced_response_generator
                 )
                 
-                # Save updated conversation to database if possible
-                if config.pocketbase_manager:
-                    await config.pocketbase_manager.save_conversation(
-                        current_user['user_id'],
-                        {
-                            "conversation_id": conversation_id,
-                            "phase": response_data["phase"],
-                            "last_message": user_message,
-                            "last_response": response_data["response"],
-                            "progress_scores": response_data.get("current_progress_scores")
-                        }
-                    )
+                # Save messages to PostgreSQL if available
+                if config.postgresql_available:
+                    from utils import PostgreSQLManager
+                    import uuid
+                    db = next(PostgreSQLManager.get_db())
+                    if db:
+                        # Save user message
+                        PostgreSQLManager.save_message_to_db(
+                            db,
+                            str(uuid.uuid4()),
+                            conversation_id,
+                            'user',
+                            user_message,
+                            response_data["phase"]
+                        )
+                        # Save assistant response
+                        PostgreSQLManager.save_message_to_db(
+                            db,
+                            str(uuid.uuid4()),
+                            conversation_id,
+                            'assistant',
+                            response_data["response"],
+                            response_data["phase"]
+                        )
                 
                 return SendMessageResponse(
                     conversation_id=conversation_id,
