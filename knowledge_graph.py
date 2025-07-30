@@ -20,9 +20,18 @@ class CBTKnowledgeGraph:
     Stores entities, relations, and observations like real MCP system
     """
     
-    def __init__(self, storage_path: str = "cbt_knowledge_graph.json"):
-        """Initialize the knowledge graph with MCP-style structure"""
-        self.storage_path = Path(storage_path)
+    def __init__(self, storage_path: str = "cbt_knowledge_graph.json", db_session=None, user_id=None):
+        """Initialize the knowledge graph with MCP-style structure
+        
+        Args:
+            storage_path: Path for file-based storage (used if db_session is None)
+            db_session: Database session for PostgreSQL storage
+            user_id: User ID for database storage
+        """
+        self.storage_path = Path(storage_path) if storage_path else None
+        self.db_session = db_session
+        self.user_id = user_id
+        self.user = None
         
         # MCP-style storage
         self.entities = {}  # {entity_name: entity_data}
@@ -31,7 +40,8 @@ class CBTKnowledgeGraph:
         # Load existing memory
         self._load_memory()
         
-        logger.info("CBT Knowledge Graph initialized with MCP-style entity system")
+        mode = "database" if db_session else "file"
+        logger.info(f"CBT Knowledge Graph initialized with MCP-style entity system (mode: {mode})")
     
     def extract_entities_no_training(self, user_input: str, cbt_triggered: bool) -> Dict[str, Any]:
         """
@@ -376,8 +386,65 @@ Important:
         }
     
     def _save_memory(self):
-        """Save knowledge graph to disk with detailed logging"""
+        """Save knowledge graph to disk or database with detailed logging"""
+        if self.db_session and self.user_id:
+            self._save_to_db()
+        else:
+            self._save_to_file()
+    
+    def _save_to_db(self):
+        """Save knowledge graph to database"""
         try:
+            # Import here to avoid circular imports
+            from utils import DBUser
+            
+            if not self.user:
+                self.user = self.db_session.query(DBUser).filter_by(id=self.user_id).first()
+            
+            if self.user:
+                # Prepare knowledge graph data
+                kg_data = {
+                    "entities": self.entities,
+                    "relations": self.relations,
+                    "metadata": {
+                        "last_saved": datetime.now().isoformat(),
+                        "total_entities": len(self.entities),
+                        "total_relations": len(self.relations),
+                        "system_type": "mcp_style_cbt_kg_db"
+                    }
+                }
+                
+                # Update user's knowledge graph
+                self.user.knowledge_graph = kg_data
+                self.db_session.commit()
+                
+                # Enhanced logging
+                entity_types = {}
+                for entity in self.entities.values():
+                    entity_type = entity.get("entityType", "unknown")
+                    entity_types[entity_type] = entity_types.get(entity_type, 0) + 1
+                
+                logger.info(f"🧠 KNOWLEDGE GRAPH SAVED TO DATABASE:")
+                logger.info(f"   👤 User: {self.user_id}")
+                logger.info(f"   🏷️ Entities: {len(self.entities)} ({entity_types})")
+                logger.info(f"   🔗 Relations: {len(self.relations)}")
+                logger.info(f"   ⏰ Saved: {datetime.now().strftime('%H:%M:%S')}")
+                
+            else:
+                logger.error(f"❌ User {self.user_id} not found in database")
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to save knowledge graph to DB: {e}")
+            if self.db_session:
+                self.db_session.rollback()
+    
+    def _save_to_file(self):
+        """Save knowledge graph to file"""
+        try:
+            if not self.storage_path:
+                logger.warning("No storage path configured for file saving")
+                return
+                
             memory_data = {
                 "entities": self.entities,
                 "relations": self.relations,
@@ -414,23 +481,54 @@ Important:
             logger.info(f"   ⏰ Saved: {datetime.now().strftime('%H:%M:%S')}")
                 
         except Exception as e:
-            logger.error(f"❌ Failed to save knowledge graph: {e}")
+            logger.error(f"❌ Failed to save knowledge graph to file: {e}")
     
     def _load_memory(self):
-        """Load knowledge graph from disk"""
+        """Load knowledge graph from disk or database"""
+        if self.db_session and self.user_id:
+            self._load_from_db()
+        else:
+            self._load_from_file()
+    
+    def _load_from_db(self):
+        """Load knowledge graph from database"""
         try:
-            if self.storage_path.exists():
+            # Import here to avoid circular imports
+            from utils import DBUser
+            
+            # Get user from database
+            self.user = self.db_session.query(DBUser).filter_by(id=self.user_id).first()
+            
+            if self.user and self.user.knowledge_graph:
+                kg_data = self.user.knowledge_graph
+                self.entities = kg_data.get("entities", {})
+                self.relations = kg_data.get("relations", [])
+                logger.info(f"📂 Loaded knowledge graph from DB: {len(self.entities)} entities, {len(self.relations)} relations")
+            else:
+                logger.info("🆕 No existing knowledge graph in DB - starting fresh")
+                self.entities = {}
+                self.relations = []
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to load knowledge graph from DB: {e}")
+            self.entities = {}
+            self.relations = []
+    
+    def _load_from_file(self):
+        """Load knowledge graph from file"""
+        try:
+            if self.storage_path and self.storage_path.exists():
                 with open(self.storage_path, 'r') as f:
                     memory_data = json.load(f)
                 
                 self.entities = memory_data.get("entities", {})
                 self.relations = memory_data.get("relations", [])
                 
-                logger.info(f"📂 Loaded knowledge graph: {len(self.entities)} entities, {len(self.relations)} relations")
+                logger.info(f"📂 Loaded knowledge graph from file: {len(self.entities)} entities, {len(self.relations)} relations")
             else:
                 logger.info("🆕 Starting fresh knowledge graph")
                 
         except Exception as e:
-            logger.error(f"❌ Failed to load knowledge graph: {e}")
+            logger.error(f"❌ Failed to load knowledge graph from file: {e}")
             self.entities = {}
             self.relations = []
