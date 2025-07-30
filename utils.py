@@ -226,6 +226,7 @@ if SQLALCHEMY_AVAILABLE:
         created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
         last_login = Column(DateTime)
         user_metadata = Column(JSON)
+        knowledge_graph = Column(JSON, nullable=True, default=lambda: {"entities": {}, "relations": []})
         
         conversations = relationship("DBConversation", back_populates="user", cascade="all, delete-orphan")
 

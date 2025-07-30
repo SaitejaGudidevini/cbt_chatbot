@@ -438,11 +438,33 @@ class ContextEngineeredCBTAPI:
                 # Use authenticated user's ID
                 authenticated_user_id = current_user['user_id']
                 
+                # Get database session for user-specific knowledge graph
+                db_session = None
+                if config.postgresql_available:
+                    try:
+                        from utils import PostgreSQLManager
+                        db_session = next(PostgreSQLManager.get_db())
+                    except Exception as e:
+                        logger.warning(f"Could not get DB session for knowledge graph: {e}")
+                
+                # Create a new conversation manager with DB session for this user
+                user_conversation_manager = EnhancedConversationManager(
+                    classifier_model_path=self.classifier_model_path,
+                    use_ml_classifier=True,
+                    knowledge_graph_path=self.knowledge_graph_path,
+                    db_session=db_session
+                )
+                
                 # Start enhanced conversation
-                conversation_data = await self.enhanced_conversation_manager.start_conversation(
+                conversation_data = await user_conversation_manager.start_conversation(
                     user_id=authenticated_user_id, 
                     channel_info=channel_info
                 )
+                
+                # Store the user-specific manager in active conversations
+                if not hasattr(self, 'active_user_managers'):
+                    self.active_user_managers = {}
+                self.active_user_managers[conversation_data["conversation_id"]] = user_conversation_manager
                 
                 conversation_id = conversation_data["conversation_id"]
                 
@@ -489,8 +511,16 @@ class ContextEngineeredCBTAPI:
             logger.info(f"Processing message for conversation {conversation_id} from user {current_user['user_id']}")
             
             try:
+                # Get the user-specific conversation manager
+                if hasattr(self, 'active_user_managers') and conversation_id in self.active_user_managers:
+                    user_conversation_manager = self.active_user_managers[conversation_id]
+                else:
+                    # Fallback to default manager if user-specific not found
+                    logger.warning(f"User-specific manager not found for conversation {conversation_id}, using default")
+                    user_conversation_manager = self.enhanced_conversation_manager
+                
                 # Process message through enhanced conversation manager
-                response_data = await self.enhanced_conversation_manager.process_message_with_context(
+                response_data = await user_conversation_manager.process_message_with_context(
                     user_input=user_message,
                     conversation_id=conversation_id,
                     llm_client=self.enhanced_response_generator
@@ -531,6 +561,53 @@ class ContextEngineeredCBTAPI:
             except Exception as e:
                 logger.error(f"Error processing message: {e}")
                 raise HTTPException(status_code=500, detail=f"Error processing message: {str(e)}")
+        
+        @self.app.get('/knowledge-graph/view', tags=["Knowledge Graph"])
+        async def view_knowledge_graph(current_user: dict = Depends(get_current_user)):
+            """View the current user's knowledge graph data"""
+            try:
+                user_id = current_user['user_id']
+                
+                if config.postgresql_available:
+                    # Get user's knowledge graph from database
+                    from utils import PostgreSQLManager, DBUser
+                    db = next(PostgreSQLManager.get_db())
+                    
+                    user = db.query(DBUser).filter_by(id=user_id).first()
+                    if user and user.knowledge_graph:
+                        return JSONResponse(content={
+                            "status": "success",
+                            "data": user.knowledge_graph,
+                            "user_id": user_id,
+                            "storage": "database"
+                        })
+                    else:
+                        return JSONResponse(content={
+                            "status": "no_data",
+                            "message": "No knowledge graph data for this user yet",
+                            "user_id": user_id
+                        })
+                else:
+                    # Fallback to file-based storage
+                    kg_path = config.get_api_config('knowledge_graph_path')
+                    if os.path.exists(kg_path):
+                        with open(kg_path, 'r') as f:
+                            kg_data = json.load(f)
+                        return JSONResponse(content={
+                            "status": "success",
+                            "data": kg_data,
+                            "file_path": kg_path,
+                            "storage": "file",
+                            "note": "This is shared storage. Enable PostgreSQL for user-specific knowledge graphs."
+                        })
+                    else:
+                        return JSONResponse(content={
+                            "status": "no_data",
+                            "message": "Knowledge graph not yet created"
+                        })
+            except Exception as e:
+                logger.error(f"Error reading knowledge graph: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
         
         @self.app.get('/conversation/state', response_model=ConversationStateResponse, tags=["Conversation"])
         async def get_conversation_state(

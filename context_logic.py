@@ -419,13 +419,15 @@ class EnhancedConversationManager:
     def __init__(self, 
                  classifier_model_path: str = None,
                  use_ml_classifier: bool = True,
-                 knowledge_graph_path: str = None):
+                 knowledge_graph_path: str = None,
+                 db_session=None):
         
         logger.info("🧠 Initializing Enhanced Conversation Manager (AWS Ready)")
         
         # Use configuration-based paths
         self.classifier_model_path = classifier_model_path or str(config.get_model_path('classifier'))
         self.knowledge_graph_path = knowledge_graph_path or config.get_api_config('knowledge_graph_path')
+        self.db_session = db_session
         
         # Initialize components
         self._initialize_components(use_ml_classifier)
@@ -460,6 +462,18 @@ class EnhancedConversationManager:
             
             conversation_id = self.conversation_manager.conversation_id
             logger.info(f"Original CBT conversation manager created: {conversation_id}")
+            
+            # Create user-specific knowledge graph if db_session is available
+            if self.db_session and user_id:
+                self.knowledge_graph = CBTKnowledgeGraph(
+                    storage_path=None,  # No file storage when using DB
+                    db_session=self.db_session,
+                    user_id=user_id
+                )
+                logger.info(f"Created user-specific knowledge graph for user: {user_id}")
+            else:
+                # Fallback to file-based storage
+                self.knowledge_graph = CBTKnowledgeGraph(storage_path=self.knowledge_graph_path)
             
             # Initialize context engineering session data
             context_session_data = {
