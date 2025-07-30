@@ -10,7 +10,9 @@ class OllamaClient:
     
     def __init__(self, model_name="qwen2.5:14b-instruct", base_url=None):
         if base_url is None:
-            base_url = os.getenv("OLLAMA_BASE_URL", "http://100.111.94.76:11434")
+            env_url = os.getenv("OLLAMA_BASE_URL")
+            logger.info(f"OLLAMA_BASE_URL from env: {env_url}")
+            base_url = env_url if env_url else "http://100.111.94.76:11434"
         self.model_name = model_name
         self.base_url = base_url
         self.system_prompt = self._load_system_prompt()

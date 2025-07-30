@@ -7,6 +7,10 @@ import os
 import sys
 import logging
 import uvicorn
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from fastapi import FastAPI, HTTPException, Query, Depends, Header, Request
