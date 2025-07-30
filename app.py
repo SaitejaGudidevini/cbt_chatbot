@@ -303,6 +303,48 @@ class ContextEngineeredCBTAPI:
                 logger.error(f"❌ Get profile error: {e}")
                 raise HTTPException(status_code=500, detail="Internal server error")
         
+        @self.app.post('/database/add-knowledge-graph-column', tags=["Admin"])
+        async def add_knowledge_graph_column():
+            """Add knowledge_graph column to existing users table"""
+            if not config.postgresql_available:
+                raise HTTPException(status_code=503, detail="PostgreSQL not configured")
+            
+            try:
+                from utils import PostgreSQLManager
+                from sqlalchemy import text
+                
+                db = next(PostgreSQLManager.get_db())
+                
+                # Check if column already exists
+                check_query = text("""
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name='db_users' AND column_name='knowledge_graph'
+                """)
+                
+                result = db.execute(check_query).fetchone()
+                
+                if result:
+                    return {"message": "knowledge_graph column already exists"}
+                
+                # Add the column if it doesn't exist
+                alter_query = text("""
+                    ALTER TABLE db_users 
+                    ADD COLUMN knowledge_graph JSON DEFAULT '{"entities": {}, "relations": []}'::json
+                """)
+                
+                db.execute(alter_query)
+                db.commit()
+                
+                logger.info("✅ Successfully added knowledge_graph column to db_users table")
+                return {"message": "Successfully added knowledge_graph column"}
+                
+            except Exception as e:
+                logger.error(f"❌ Error adding knowledge_graph column: {e}")
+                if db:
+                    db.rollback()
+                raise HTTPException(status_code=500, detail=str(e))
+        
         @self.app.post('/database/init', tags=["Admin"])
         async def init_database():
             """Initialize PostgreSQL database tables (admin only)"""
