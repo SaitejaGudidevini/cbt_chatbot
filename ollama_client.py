@@ -89,9 +89,14 @@ How to apply: Weave the user's specific situation into your questions. If they a
         
         try:
             logger.info(f"Sending request to Ollama: {self.base_url}/api/generate")
+            headers = {
+                "Content-Type": "application/json",
+                "ngrok-skip-browser-warning": "true"  # Skip ngrok warning page
+            }
             response = requests.post(
                 f"{self.base_url}/api/generate",
                 json=payload,
+                headers=headers,
                 timeout=60  # Ollama can be slower than cloud APIs
             )
             
