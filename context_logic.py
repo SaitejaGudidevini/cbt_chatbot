@@ -16,6 +16,7 @@ from enum import Enum
 # Import utilities and CBT logic
 from utils import config
 from cbt_logic import ConversationManager, ConversationPhase, ResponseGenerator
+from knowledge_graph import CBTKnowledgeGraph
 
 logger = logging.getLogger(__name__)
 
@@ -435,7 +436,7 @@ class EnhancedConversationManager:
         """Initialize all components with AWS-ready configuration"""
         try:
             # Initialize knowledge graph - Simplified for existing code only
-            self.knowledge_graph = SimpleKnowledgeGraph(storage_path=self.knowledge_graph_path)
+            self.knowledge_graph = CBTKnowledgeGraph(storage_path=self.knowledge_graph_path)
             
             # Initialize active conversations tracking
             self.active_conversations = {}
@@ -826,110 +827,12 @@ class EnhancedResponseGenerator:
         return context
 
 # ========================================
-# SIMPLE KNOWLEDGE GRAPH (existing functionality)
-# ========================================
 
-class SimpleKnowledgeGraph:
-    """Simplified knowledge graph for existing functionality"""
-    
-    def __init__(self, storage_path: str):
-        self.storage_path = storage_path
-        self.user_data = {}
-        self._load_data()
-    
-    def extract_entities(self, user_input: str, cbt_triggered: bool) -> Dict:
-        """Extract entities from user input"""
-        # Simplified entity extraction
-        return {
-            "emotions": self._extract_emotions(user_input),
-            "triggers": self._extract_triggers(user_input) if cbt_triggered else [],
-            "timestamp": datetime.now().isoformat()
-        }
-    
-    def store_conversation_turn(self, user_id: str, entities: Dict, cbt_triggered: bool):
-        """Store conversation turn data"""
-        if user_id not in self.user_data:
-            self.user_data[user_id] = {"sessions": [], "patterns": {}}
-        
-        self.user_data[user_id]["sessions"].append({
-            "entities": entities,
-            "cbt_triggered": cbt_triggered,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        self._save_data()
-    
-    def get_user_context(self, user_id: str, current_entities: Dict = None) -> str:
-        """Get user context string"""
-        if user_id not in self.user_data:
-            return ""
-        
-        sessions = self.user_data[user_id]["sessions"]
-        if not sessions:
-            return ""
-        
-        recent_emotions = []
-        for session in sessions[-3:]:  # Last 3 sessions
-            emotions = session.get("entities", {}).get("emotions", [])
-            recent_emotions.extend(emotions)
-        
-        if recent_emotions:
-            return f"Recent emotional patterns: {', '.join(set(recent_emotions))}"
-        
-        return ""
-    
-    def get_user_insights(self, user_id: str) -> Dict:
-        """Get user insights"""
-        if user_id not in self.user_data:
-            return {"total_sessions": 0, "patterns": {}}
-        
-        sessions = self.user_data[user_id]["sessions"]
-        return {
-            "total_sessions": len(sessions),
-            "cbt_sessions": len([s for s in sessions if s.get("cbt_triggered", False)]),
-            "patterns": {}
-        }
-    
-    def _extract_emotions(self, text: str) -> List[str]:
-        """Extract emotions from text"""
-        emotion_words = {
-            "sad": ["sad", "depressed", "down", "blue"],
-            "angry": ["angry", "mad", "furious", "frustrated"],
-            "anxious": ["anxious", "worried", "nervous", "scared"],
-            "happy": ["happy", "joyful", "excited", "glad"]
-        }
-        
-        text_lower = text.lower()
-        found_emotions = []
-        
-        for emotion, words in emotion_words.items():
-            if any(word in text_lower for word in words):
-                found_emotions.append(emotion)
-        
-        return found_emotions
-    
-    def _extract_triggers(self, text: str) -> List[str]:
-        """Extract CBT triggers from text"""
-        trigger_patterns = ["work", "family", "relationship", "health", "money"]
-        text_lower = text.lower()
-        
-        return [trigger for trigger in trigger_patterns if trigger in text_lower]
-    
-    def _load_data(self):
-        """Load data from storage"""
-        if os.path.exists(self.storage_path):
-            try:
-                with open(self.storage_path, 'r') as f:
-                    self.user_data = json.load(f)
-            except Exception as e:
-                logger.error(f"Error loading knowledge graph data: {e}")
-                self.user_data = {}
-    
-    def _save_data(self):
-        """Save data to storage"""
-        try:
-            os.makedirs(os.path.dirname(self.storage_path), exist_ok=True)
-            with open(self.storage_path, 'w') as f:
-                json.dump(self.user_data, f, indent=2)
-        except Exception as e:
-            logger.error(f"Error saving knowledge graph data: {e}")
+# KNOWLEDGE GRAPH (using enhanced MCP-style implementation)
+# ========================================
+# SimpleKnowledgeGraph has been replaced by CBTKnowledgeGraph from knowledge_graph.py
+# The CBTKnowledgeGraph provides:
+# - MCP-style entity-relationship extraction
+# - LLM-based intelligent entity detection
+# - Rich contextual relationship mapping
+# - Enhanced user insights and memory persistence
