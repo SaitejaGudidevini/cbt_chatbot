@@ -22,7 +22,7 @@ class ConversationPhase(Enum):
 class ConversationManager:
     """Tracks conversation state and detects CBT triggers with real-time progress evaluation."""
     
-    def __init__(self, use_ml_classifier=True, classifier_model_path="/Users/saitejagudidevini/Documents/Dev/grpo_trainer/cbtapi/BinaryClassifier/cbt_classifier"):
+    def __init__(self, use_ml_classifier=True, classifier_model_path=None):
         self.use_ml_classifier = use_ml_classifier
         self.cbt_classifier = None
         self.cbt_evaluator = None
@@ -37,8 +37,13 @@ class ConversationManager:
                 
                 from BinaryClassifier.binary_classifier import CBTBinaryClassifier
                 self.cbt_classifier = CBTBinaryClassifier()
+                
+                # Use default path if not provided
+                if classifier_model_path is None:
+                    classifier_model_path = os.path.join(binary_classifier_path, 'cbt_classifier')
+                
                 self.cbt_classifier.load_model(classifier_model_path)
-                logger.info("ML classifier loaded successfully")
+                logger.info(f"ML classifier loaded successfully from: {classifier_model_path}")
             except Exception as e:
                 logger.warning(f"Failed to load ML classifier: {e}. Falling back to regex.")
                 self.use_ml_classifier = False
