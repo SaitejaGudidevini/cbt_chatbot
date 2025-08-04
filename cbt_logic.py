@@ -32,6 +32,29 @@ class ConversationManager:
             try:
                 # Add the BinaryClassifier directory to path
                 binary_classifier_path = os.path.join(os.path.dirname(__file__), 'BinaryClassifier')
+                
+                # Check if BinaryClassifier directory exists, if not download from HF
+                if not os.path.exists(binary_classifier_path):
+                    logger.info("BinaryClassifier not found locally. Downloading from HuggingFace...")
+                    os.makedirs(binary_classifier_path, exist_ok=True)
+                    
+                    # Download binary_classifier.py from HuggingFace
+                    import urllib.request
+                    classifier_url = "https://huggingface.co/SaitejaJate/Binary_classifier/resolve/main/binary_classifier.py"
+                    classifier_file = os.path.join(binary_classifier_path, "binary_classifier.py")
+                    
+                    try:
+                        urllib.request.urlretrieve(classifier_url, classifier_file)
+                        logger.info(f"Downloaded binary_classifier.py to {classifier_file}")
+                    except Exception as download_error:
+                        logger.error(f"Failed to download binary_classifier.py: {download_error}")
+                        raise
+                    
+                    # Create __init__.py to make it a proper Python package
+                    init_file = os.path.join(binary_classifier_path, "__init__.py")
+                    with open(init_file, "w") as f:
+                        f.write("")
+                
                 if binary_classifier_path not in sys.path:
                     sys.path.append(binary_classifier_path)
                 
@@ -43,15 +66,9 @@ class ConversationManager:
                 hf_model_id = os.getenv("HF_MODEL_ID", "SaitejaJate/Binary_classifier")
                 
                 if use_hf and classifier_model_path is None:
-                    # Download from Hugging Face Hub
-                    from huggingface_hub import snapshot_download
-                    logger.info(f"Downloading model from Hugging Face Hub: {hf_model_id}")
-                    cache_dir = os.path.join(binary_classifier_path, 'model_cache')
-                    classifier_model_path = snapshot_download(
-                        repo_id=hf_model_id,
-                        cache_dir=cache_dir,
-                        local_dir=os.path.join(cache_dir, 'downloaded_model')
-                    )
+                    # Use HuggingFace model ID directly - let transformers handle the download
+                    classifier_model_path = hf_model_id
+                    logger.info(f"Will load model from HuggingFace: {hf_model_id}")
                 elif classifier_model_path is None:
                     # Use default local path
                     classifier_model_path = os.path.join(binary_classifier_path, 'cbt_classifier')
