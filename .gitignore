@@ -41,3 +41,9 @@ pb_data/
 # Temporary files
 tmp/
 temp/
+
+# Model cache (downloaded from HuggingFace)
+BinaryClassifier/model_cache/
+
+# Entire BinaryClassifier folder (model is on HuggingFace)
+BinaryClassifier/
