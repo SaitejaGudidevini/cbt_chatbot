@@ -455,9 +455,13 @@ class EnhancedConversationManager:
         
         try:
             # Create original ConversationManager with full ML pipeline
+            # Check if we should use HF model
+            use_hf = os.getenv("USE_HF_MODEL", "false").lower() == "true"
+            classifier_path = None if use_hf else self.classifier_model_path
+            
             self.conversation_manager = ConversationManager(
                 use_ml_classifier=True,
-                classifier_model_path=self.classifier_model_path
+                classifier_model_path=classifier_path
             )
             
             conversation_id = self.conversation_manager.conversation_id

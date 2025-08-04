@@ -38,8 +38,22 @@ class ConversationManager:
                 from BinaryClassifier.binary_classifier import CBTBinaryClassifier
                 self.cbt_classifier = CBTBinaryClassifier()
                 
-                # Use default path if not provided
-                if classifier_model_path is None:
+                # Check if we should use HF Hub
+                use_hf = os.getenv("USE_HF_MODEL", "false").lower() == "true"
+                hf_model_id = os.getenv("HF_MODEL_ID", "SaitejaJate/Binary_classifier")
+                
+                if use_hf and classifier_model_path is None:
+                    # Download from Hugging Face Hub
+                    from huggingface_hub import snapshot_download
+                    logger.info(f"Downloading model from Hugging Face Hub: {hf_model_id}")
+                    cache_dir = os.path.join(binary_classifier_path, 'model_cache')
+                    classifier_model_path = snapshot_download(
+                        repo_id=hf_model_id,
+                        cache_dir=cache_dir,
+                        local_dir=os.path.join(cache_dir, 'downloaded_model')
+                    )
+                elif classifier_model_path is None:
+                    # Use default local path
                     classifier_model_path = os.path.join(binary_classifier_path, 'cbt_classifier')
                 
                 self.cbt_classifier.load_model(classifier_model_path)
