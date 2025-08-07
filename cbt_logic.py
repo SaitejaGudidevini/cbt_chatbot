@@ -79,33 +79,12 @@ class ConversationManager:
                 logger.warning(f"Failed to load ML classifier: {e}. Falling back to regex.")
                 self.use_ml_classifier = False
         
-        # Initialize sequence regressor API endpoint
-        self.sequence_regressor_url = os.getenv("SEQUENCE_REGRESSOR_API_URL", "http://localhost:8001")
-        self.sequence_regressor_available = self._check_sequence_regressor_api()
+        # Initialize sequence regressor locally
+        self.sequence_regressor = None
+        self.sequence_regressor_available = self._initialize_local_sequence_regressor()
 
         # Initialize CBT evaluator for real-time progress tracking
-        try:
-            # Add the RegressionEvaluation directory to path
-            evaluations_path = "/Users/saitejagudidevini/Documents/Dev/grpo_trainer/cbtapi/RegressionEvaluation"
-            if evaluations_path not in sys.path:
-                sys.path.append(evaluations_path)
-            
-            from RegressionEvaluation.step4training import CBTEvaluatorSimple
-            self.cbt_evaluator = CBTEvaluatorSimple()
-            
-            # Load the pre-trained model
-            evaluator_model_path = os.path.join(evaluations_path, "cbt_evaluator_simple")
-            if os.path.exists(evaluator_model_path):
-                import joblib
-                self.cbt_evaluator.vectorizer = joblib.load(os.path.join(evaluator_model_path, "vectorizer.joblib"))
-                self.cbt_evaluator.model = joblib.load(os.path.join(evaluator_model_path, "model.joblib"))
-                logger.info("CBT evaluator loaded successfully")
-            else:
-                logger.warning(f"CBT evaluator model not found at {evaluator_model_path}")
-                self.cbt_evaluator = None
-        except Exception as e:
-            logger.warning(f"Failed to load CBT evaluator: {e}. Progress tracking disabled.")
-            self.cbt_evaluator = None
+        self._initialize_local_cbt_evaluator()
         
         self.reset_conversation()
     
@@ -136,6 +115,54 @@ class ConversationManager:
         self.flow_transitions = []
         self.phase_start_time = datetime.now()
         self.message_count_in_phase = 0
+    
+    def _initialize_local_sequence_regressor(self) -> bool:
+        """Initialize the local sequence regressor model."""
+        try:
+            # Add the sequence model directory to path
+            sequence_path = os.path.join(os.path.dirname(__file__), 'cbt_sequence_regressor', 'cbt_sequence_model')
+            if sequence_path not in sys.path:
+                sys.path.append(sequence_path)
+            
+            from sequence_regressor import CBTSequenceComplianceRegressor
+            self.sequence_regressor = CBTSequenceComplianceRegressor(sequence_path)
+            logger.info("Sequence regressor loaded successfully from local files")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to load local sequence regressor: {e}")
+            return False
+    
+    def _initialize_local_cbt_evaluator(self):
+        """Initialize the local CBT evaluator model."""
+        try:
+            # Add the RegressionEvaluation directory to path
+            eval_path = os.path.join(os.path.dirname(__file__), 'RegressionEvaluation')
+            if eval_path not in sys.path:
+                sys.path.append(eval_path)
+            
+            from step4training import CBTEvaluatorSimple
+            self.cbt_evaluator = CBTEvaluatorSimple()
+            
+            # Load the pre-trained model
+            model_path = os.path.join(eval_path, 'cbt_evaluator_simple')
+            if os.path.exists(model_path):
+                import joblib
+                vectorizer_path = os.path.join(model_path, 'vectorizer.joblib')
+                model_file_path = os.path.join(model_path, 'model.joblib')
+                
+                if os.path.exists(vectorizer_path) and os.path.exists(model_file_path):
+                    self.cbt_evaluator.vectorizer = joblib.load(vectorizer_path)
+                    self.cbt_evaluator.model = joblib.load(model_file_path)
+                    logger.info("CBT evaluator loaded successfully from local files")
+                else:
+                    logger.warning(f"CBT evaluator model files not found in {model_path}")
+                    self.cbt_evaluator = None
+            else:
+                logger.warning(f"CBT evaluator model directory not found: {model_path}")
+                self.cbt_evaluator = None
+        except Exception as e:
+            logger.warning(f"Failed to load local CBT evaluator: {e}")
+            self.cbt_evaluator = None
     
     def _check_sequence_regressor_api(self) -> bool:
         """Check if the sequence regressor API is available."""
@@ -313,18 +340,23 @@ class ConversationManager:
                 "cbt_step": self.current_cbt_step
             }
             
-            # Call the sequence regressor API
-            response = requests.post(
-                f"{self.sequence_regressor_url}/predict",
-                json=payload,
-                timeout=5
-            )
-            
-            if response.status_code != 200:
-                logger.error(f"Sequence regressor API error: {response.status_code}")
-                return None
-                
-            compliance_scores = response.json()
+            # Use local sequence regressor if available
+            if self.sequence_regressor:
+                compliance_scores = self.sequence_regressor.predict(
+                    model_question=model_question,
+                    user_response=user_response,
+                    conversation_context=conversation_context,
+                    trigger_statement=trigger_statement,
+                    cbt_step=self.current_cbt_step
+                )
+            else:
+                logger.warning("Sequence regressor not available, using default scores")
+                compliance_scores = {
+                    "satisfaction_score": 0.5,
+                    "ready_for_next_step": False,
+                    "response_quality": "moderate",
+                    "suggested_action": "continue_current_step"
+                }
             
             # Update current compliance scores
             self.current_compliance_scores = compliance_scores
