@@ -461,7 +461,8 @@ class EnhancedConversationManager:
             
             self.conversation_manager = ConversationManager(
                 use_ml_classifier=True,
-                classifier_model_path=classifier_path
+                classifier_model_path=classifier_path,
+                classifier_threshold=None  # Will use environment variable default
             )
             
             conversation_id = self.conversation_manager.conversation_id

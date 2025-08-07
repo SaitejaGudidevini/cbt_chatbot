@@ -22,10 +22,11 @@ class ConversationPhase(Enum):
 class ConversationManager:
     """Tracks conversation state and detects CBT triggers with real-time progress evaluation."""
     
-    def __init__(self, use_ml_classifier=True, classifier_model_path=None):
+    def __init__(self, use_ml_classifier=True, classifier_model_path=None, classifier_threshold=None):
         self.use_ml_classifier = use_ml_classifier
         self.cbt_classifier = None
         self.cbt_evaluator = None
+        self.classifier_threshold = classifier_threshold or float(os.getenv("CBT_CLASSIFIER_THRESHOLD", "0.5"))
         
         # Initialize ML classifier if requested
         if use_ml_classifier:
@@ -79,33 +80,15 @@ class ConversationManager:
                 logger.warning(f"Failed to load ML classifier: {e}. Falling back to regex.")
                 self.use_ml_classifier = False
         
-        # Initialize sequence regressor API endpoint
-        self.sequence_regressor_url = os.getenv("SEQUENCE_REGRESSOR_API_URL", "http://localhost:8001")
-        self.sequence_regressor_available = self._check_sequence_regressor_api()
+        # Initialize sequence regressor HF endpoint
+        self.sequence_regressor_hf_model = os.getenv("SEQUENCE_REGRESSOR_HF_MODEL", "SaitejaJate/cbt_sequence_regressor")
+        self.hf_api_token = os.getenv("HF_API_TOKEN", "")
+        self.sequence_regressor_available = True  # Always available with HF endpoint
 
-        # Initialize CBT evaluator for real-time progress tracking
-        try:
-            # Add the RegressionEvaluation directory to path
-            evaluations_path = "/Users/saitejagudidevini/Documents/Dev/grpo_trainer/cbtapi/RegressionEvaluation"
-            if evaluations_path not in sys.path:
-                sys.path.append(evaluations_path)
-            
-            from RegressionEvaluation.step4training import CBTEvaluatorSimple
-            self.cbt_evaluator = CBTEvaluatorSimple()
-            
-            # Load the pre-trained model
-            evaluator_model_path = os.path.join(evaluations_path, "cbt_evaluator_simple")
-            if os.path.exists(evaluator_model_path):
-                import joblib
-                self.cbt_evaluator.vectorizer = joblib.load(os.path.join(evaluator_model_path, "vectorizer.joblib"))
-                self.cbt_evaluator.model = joblib.load(os.path.join(evaluator_model_path, "model.joblib"))
-                logger.info("CBT evaluator loaded successfully")
-            else:
-                logger.warning(f"CBT evaluator model not found at {evaluator_model_path}")
-                self.cbt_evaluator = None
-        except Exception as e:
-            logger.warning(f"Failed to load CBT evaluator: {e}. Progress tracking disabled.")
-            self.cbt_evaluator = None
+        # Initialize CBT evaluator HF endpoint for real-time progress tracking
+        self.evaluator_hf_model = os.getenv("EVALUATOR_HF_MODEL", "SaitejaJate/Regression_Evaluation")
+        self.cbt_evaluator_available = True  # Always available with HF endpoint
+        logger.info(f"CBT evaluator will use HuggingFace model: {self.evaluator_hf_model}")
         
         self.reset_conversation()
     
@@ -137,20 +120,147 @@ class ConversationManager:
         self.phase_start_time = datetime.now()
         self.message_count_in_phase = 0
     
-    def _check_sequence_regressor_api(self) -> bool:
-        """Check if the sequence regressor API is available."""
+    def _call_hf_inference_api(self, model_id: str, inputs: any, task: str = "text-classification") -> Optional[Dict]:
+        """Call HuggingFace Inference API for a model."""
         try:
-            response = requests.get(f"{self.sequence_regressor_url}/health", timeout=2)
+            headers = {}
+            if self.hf_api_token:
+                headers["Authorization"] = f"Bearer {self.hf_api_token}"
+            
+            api_url = f"https://api-inference.huggingface.co/models/{model_id}"
+            
+            # Prepare the payload based on task type
+            if task == "text-classification":
+                payload = {"inputs": inputs}
+            elif task == "feature-extraction":
+                payload = {"inputs": inputs}
+            else:
+                payload = {"inputs": inputs}
+            
+            response = requests.post(
+                api_url,
+                headers=headers,
+                json=payload,
+                timeout=20
+            )
+            
             if response.status_code == 200:
-                health_data = response.json()
-                if health_data.get("model_loaded"):
-                    logger.info(f"Sequence regressor API available at {self.sequence_regressor_url}")
-                    return True
-            logger.warning(f"Sequence regressor API not available: {response.status_code}")
-            return False
+                return response.json()
+            elif response.status_code == 503:
+                # Model is loading, retry after a moment
+                logger.warning(f"Model {model_id} is loading, retrying...")
+                import time
+                time.sleep(5)
+                response = requests.post(api_url, headers=headers, json=payload, timeout=20)
+                if response.status_code == 200:
+                    return response.json()
+            
+            logger.error(f"HF API error for {model_id}: {response.status_code} - {response.text}")
+            return None
         except Exception as e:
-            logger.warning(f"Could not connect to sequence regressor API: {e}")
-            return False
+            logger.error(f"Failed to call HF inference API for {model_id}: {e}")
+            return None
+    
+    def _process_sequence_regressor_response(self, hf_response: any) -> Dict:
+        """Process HuggingFace API response into compliance scores."""
+        try:
+            # Default compliance scores
+            compliance_scores = {
+                "satisfaction_score": 0.5,
+                "ready_for_next_step": False,
+                "response_quality": "moderate",
+                "suggested_action": "continue_current_step"
+            }
+            
+            if isinstance(hf_response, list) and len(hf_response) > 0:
+                # Process classification results
+                if isinstance(hf_response[0], dict):
+                    # Extract scores from classification labels
+                    for item in hf_response[0] if isinstance(hf_response[0], list) else [hf_response[0]]:
+                        label = item.get('label', '').lower()
+                        score = item.get('score', 0.5)
+                        
+                        if 'satisfaction' in label or 'positive' in label:
+                            compliance_scores['satisfaction_score'] = score
+                        elif 'ready' in label or 'complete' in label:
+                            compliance_scores['ready_for_next_step'] = score > 0.6
+                        elif 'quality' in label:
+                            if score > 0.7:
+                                compliance_scores['response_quality'] = 'high'
+                            elif score > 0.4:
+                                compliance_scores['response_quality'] = 'moderate'
+                            else:
+                                compliance_scores['response_quality'] = 'low'
+            
+            return compliance_scores
+        except Exception as e:
+            logger.error(f"Error processing sequence regressor response: {e}")
+            return {
+                "satisfaction_score": 0.5,
+                "ready_for_next_step": False,
+                "response_quality": "unknown",
+                "suggested_action": "continue_current_step"
+            }
+    
+    def _process_evaluator_response(self, hf_response: any) -> Dict:
+        """Process HuggingFace Regression Evaluation API response into progress scores."""
+        try:
+            # Default progress scores matching CBT evaluator dimensions
+            progress_scores = {
+                "problem_identification": 0.5,
+                "cognitive_restructuring": 0.5,
+                "solution_generation": 0.5,
+                "therapeutic_rapport": 0.5,
+                "overall_progress": 0.5
+            }
+            
+            if isinstance(hf_response, list) and len(hf_response) > 0:
+                # Process regression/classification results
+                if isinstance(hf_response[0], dict):
+                    # Handle classification-style response
+                    items = hf_response if isinstance(hf_response[0], list) else hf_response
+                    for item in items:
+                        label = item.get('label', '').lower()
+                        score = item.get('score', 0.5)
+                        
+                        # Map labels to CBT dimensions
+                        if 'problem' in label or 'identification' in label:
+                            progress_scores['problem_identification'] = score
+                        elif 'cognitive' in label or 'restructuring' in label:
+                            progress_scores['cognitive_restructuring'] = score
+                        elif 'solution' in label or 'generation' in label:
+                            progress_scores['solution_generation'] = score
+                        elif 'rapport' in label or 'therapeutic' in label:
+                            progress_scores['therapeutic_rapport'] = score
+                        elif 'overall' in label or 'progress' in label:
+                            progress_scores['overall_progress'] = score
+                elif isinstance(hf_response[0], (float, int)):
+                    # Handle regression-style response (single score)
+                    overall_score = float(hf_response[0])
+                    # Distribute the overall score across dimensions
+                    progress_scores = {
+                        "problem_identification": overall_score * 0.9,
+                        "cognitive_restructuring": overall_score * 0.85,
+                        "solution_generation": overall_score * 0.8,
+                        "therapeutic_rapport": overall_score * 0.95,
+                        "overall_progress": overall_score
+                    }
+            
+            # Ensure scores are in valid range [0, 1]
+            for key in progress_scores:
+                progress_scores[key] = max(0.0, min(1.0, progress_scores[key]))
+            
+            return progress_scores
+        except Exception as e:
+            logger.error(f"Error processing evaluator response: {e}")
+            # Return default neutral scores
+            return {
+                "problem_identification": 0.5,
+                "cognitive_restructuring": 0.5,
+                "solution_generation": 0.5,
+                "therapeutic_rapport": 0.5,
+                "overall_progress": 0.5
+            }
     
     def detect_self_defeating_statement(self, user_input: str) -> bool:
         """Detect if user input contains self-defeating statements using ML classifier."""
@@ -159,11 +269,11 @@ class ConversationManager:
         # Use ML classifier if available
         if self.use_ml_classifier and self.cbt_classifier:
             try:
-                result = self.cbt_classifier.predict(user_input, threshold=0.7)
+                result = self.cbt_classifier.predict(user_input, threshold=self.classifier_threshold)
                 is_trigger = result['is_cbt_trigger']
                 confidence = result['confidence']
                 
-                logger.info(f"ML classifier result: {is_trigger} (confidence: {confidence:.3f})")
+                logger.info(f"ML classifier result: {is_trigger} (confidence: {confidence:.3f}, threshold: {self.classifier_threshold})")
                 return is_trigger
                 
             except Exception as e:
@@ -313,18 +423,22 @@ class ConversationManager:
                 "cbt_step": self.current_cbt_step
             }
             
-            # Call the sequence regressor API
-            response = requests.post(
-                f"{self.sequence_regressor_url}/predict",
-                json=payload,
-                timeout=5
+            # Call the HuggingFace sequence regressor endpoint
+            # Format input for the model
+            input_text = f"Model: {model_question}\nUser: {user_response}\nContext: {conversation_context[:500]}\nTrigger: {trigger_statement}\nStep: {self.current_cbt_step}"
+            
+            result = self._call_hf_inference_api(
+                self.sequence_regressor_hf_model,
+                input_text,
+                "text-classification"
             )
             
-            if response.status_code != 200:
-                logger.error(f"Sequence regressor API error: {response.status_code}")
+            if not result:
+                logger.error("Failed to get response from HF sequence regressor")
                 return None
-                
-            compliance_scores = response.json()
+            
+            # Process the HF API response into compliance scores
+            compliance_scores = self._process_sequence_regressor_response(result)
             
             # Update current compliance scores
             self.current_compliance_scores = compliance_scores
@@ -377,8 +491,8 @@ class ConversationManager:
             logger.warning(f"Unknown CBT step: {self.current_cbt_step}")
     
     def evaluate_current_conversation(self) -> Optional[Dict]:
-        """Evaluate current conversation progress using the CBT evaluator."""
-        if not self.cbt_evaluator or self.phase != ConversationPhase.CBT_REFACTORING:
+        """Evaluate current conversation progress using the CBT evaluator HF endpoint."""
+        if not self.cbt_evaluator_available or self.phase != ConversationPhase.CBT_REFACTORING:
             return None
         
         # Only evaluate if we have enough new content (at least 2 new turns)
@@ -392,8 +506,19 @@ class ConversationManager:
             if not conversation_text:
                 return None
             
-            # Get progress scores
-            scores = self.cbt_evaluator.predict(conversation_text)
+            # Call HuggingFace Regression Evaluation model
+            result = self._call_hf_inference_api(
+                self.evaluator_hf_model,
+                conversation_text,
+                "text-classification"
+            )
+            
+            if not result:
+                logger.warning("Failed to get evaluation from HF evaluator")
+                return self.current_progress_scores
+            
+            # Process the response into progress scores
+            scores = self._process_evaluator_response(result)
             
             # Update current scores
             self.current_progress_scores = scores
