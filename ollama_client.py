@@ -3,20 +3,46 @@ import json
 import logging
 from typing import Dict, Any, Optional
 import os
+from enum import Enum
+
 logger = logging.getLogger(__name__)
 
+class LLMProvider(Enum):
+    OLLAMA = "ollama"
+    GROQ = "groq"
+
 class OllamaClient:
-    """Client for local Ollama inference."""
+    """Client for both local Ollama and cloud Groq inference."""
     
-    def __init__(self, model_name="qwen2.5:14b-instruct", base_url=None):
-        if base_url is None:
-            env_url = os.getenv("OLLAMA_BASE_URL")
-            logger.info(f"OLLAMA_BASE_URL from env: {env_url}")
-            base_url = env_url if env_url else "http://100.111.94.76:11434"
-        self.model_name = model_name
-        self.base_url = base_url
+    def __init__(self, model_name="qwen2.5:14b-instruct", base_url=None, provider=None):
+        # Determine provider
+        if provider is None:
+            # Check environment variable for provider preference
+            use_groq = os.getenv("USE_GROQ", "false").lower() == "true"
+            self.provider = LLMProvider.GROQ if use_groq else LLMProvider.OLLAMA
+        else:
+            self.provider = LLMProvider(provider.lower()) if isinstance(provider, str) else provider
+        
+        # Initialize based on provider
+        if self.provider == LLMProvider.GROQ:
+            # Groq configuration
+            self.groq_api_key = os.getenv("GROQ_API_KEY")
+            if not self.groq_api_key:
+                raise ValueError("GROQ_API_KEY not found in environment variables")
+            self.groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+            self.groq_url = "https://api.groq.com/openai/v1/chat/completions"
+            logger.info(f"Initialized Groq client with model: {self.groq_model}")
+        else:
+            # Ollama configuration (existing logic)
+            if base_url is None:
+                env_url = os.getenv("OLLAMA_BASE_URL")
+                logger.info(f"OLLAMA_BASE_URL from env: {env_url}")
+                base_url = env_url if env_url else "http://100.111.94.76:11434"
+            self.model_name = model_name
+            self.base_url = base_url
+            logger.info(f"Initialized Ollama client with model: {model_name} on server: {base_url}")
+        
         self.system_prompt = self._load_system_prompt()
-        logger.info(f"Initialized Ollama client with model: {model_name} on server: {base_url}")
     
     def _load_system_prompt(self) -> str:
         """Load the robust system prompt."""
@@ -70,7 +96,15 @@ Coherence: Keep the entire conversation grounded in the user's specific, stated 
 How to apply: Weave the user's specific situation into your questions. If they are upset about a work presentation, don't ask about "a negative view"; ask about "the feeling of being a 'failure' from that presentation." This makes the process feel personal and relevant, not generic."""
 
     def generate_response(self, messages: list, conversation_context: Dict[str, Any]) -> str:
-        """Generate a response using Ollama."""
+        """Generate a response using either Ollama or Groq."""
+        
+        if self.provider == LLMProvider.GROQ:
+            return self._generate_with_groq(messages, conversation_context)
+        else:
+            return self._generate_with_ollama(messages, conversation_context)
+    
+    def _generate_with_ollama(self, messages: list, conversation_context: Dict[str, Any]) -> str:
+        """Generate a response using Ollama (existing logic preserved)."""
         
         logger.info(f"Generating response with Ollama model: {self.model_name}")
         
@@ -117,6 +151,53 @@ How to apply: Weave the user's specific situation into your questions. If they a
                 
         except Exception as e:
             logger.error(f"Error calling Ollama: {e}", exc_info=True)
+            return "I'm experiencing some technical difficulties. Please try again."
+    
+    def _generate_with_groq(self, messages: list, conversation_context: Dict[str, Any]) -> str:
+        """Generate a response using Groq API."""
+        
+        logger.info(f"Generating response with Groq model: {self.groq_model}")
+        
+        # Format messages for Groq (uses OpenAI-compatible format)
+        formatted_messages = self._format_messages_for_groq(messages, conversation_context)
+        
+        payload = {
+            "model": self.groq_model,
+            "messages": formatted_messages,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "max_tokens": 512,
+            "stream": False
+        }
+        
+        try:
+            logger.info(f"Sending request to Groq API")
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.groq_api_key}"
+            }
+            response = requests.post(
+                self.groq_url,
+                json=payload,
+                headers=headers,
+                timeout=30  # Groq is faster than Ollama
+            )
+            
+            logger.info(f"Groq response status: {response.status_code}")
+            
+            if response.status_code == 200:
+                result = response.json()
+                generated_text = result["choices"][0]["message"]["content"]
+                
+                logger.info(f"Generated text length: {len(generated_text)} characters")
+                logger.info(f"Tokens used: {result.get('usage', {})}")
+                return generated_text.strip()
+            else:
+                logger.error(f"Error from Groq: {response.status_code} - {response.text}")
+                return "I'm having trouble thinking right now. Could you try again?"
+                
+        except Exception as e:
+            logger.error(f"Error calling Groq: {e}", exc_info=True)
             return "I'm experiencing some technical difficulties. Please try again."
     
     def _format_messages_with_context(self, messages: list, context: Dict[str, Any]) -> str:
@@ -183,3 +264,64 @@ How to apply: Weave the user's specific situation into your questions. If they a
         formatted += "Assistant: "
         
         return formatted
+    
+    def _format_messages_for_groq(self, messages: list, context: Dict[str, Any]) -> list:
+        """Format messages for Groq API (OpenAI-compatible format)."""
+        
+        formatted_messages = []
+        
+        # Build system message with context (same logic as Ollama, just different format)
+        system_content = ""
+        
+        # Use dynamic system prompt from context engineering if available
+        dynamic_system_prompt = context.get("dynamic_system_prompt")
+        if dynamic_system_prompt:
+            system_content = dynamic_system_prompt
+        else:
+            system_content = self.system_prompt
+        
+        # Add memory context
+        memory_context = context.get("knowledge_graph_context", "")
+        if memory_context:
+            system_content += f"\n\nMEMORY CONTEXT:\nUser History: {memory_context}"
+        
+        # Add conversation context
+        if context.get("phase") == "cbt_refactoring":
+            trigger = context.get("trigger_statement", "")
+            system_content += f"\n\nCURRENT CONTEXT:"
+            system_content += f"\n- Phase: CBT Refactoring"
+            system_content += f"\n- Current CBT Step: {context.get('current_cbt_step', 'unknown')}"
+            if trigger:
+                system_content += f"\n- Trigger Statement: '{trigger}'"
+            
+            if context.get("adaptation_needed"):
+                system_content += f"\n\nADAPTIVE GUIDANCE:\n{context.get('cbt_guidance', '')}"
+            else:
+                system_content += f"\n- CBT Guidance: {context.get('cbt_guidance', 'Follow the CBT question sequence strictly')}"
+                
+            if context.get("compliance_scores"):
+                scores = context["compliance_scores"]
+                system_content += f"\n- Previous Response Quality: {scores['response_quality']}"
+                system_content += f"\n- User Satisfaction: {scores['satisfaction_score']:.2f}"
+        else:
+            system_content += f"\n\nCURRENT CONTEXT:"
+            system_content += f"\n- Phase: Chit-Chat"
+            system_content += f"\n- Watch for self-defeating statements to trigger CBT mode"
+            if memory_context:
+                system_content += f"\n- Use memory context to build rapport and guide toward therapy if appropriate"
+        
+        # Add system message
+        formatted_messages.append({"role": "system", "content": system_content})
+        
+        # Add conversation history
+        for message in messages:
+            role = message.get("role", "user")
+            content = message.get("content", "")
+            
+            # Map roles to Groq format
+            if role in ["user", "human"]:
+                formatted_messages.append({"role": "user", "content": content})
+            elif role in ["assistant", "ai"]:
+                formatted_messages.append({"role": "assistant", "content": content})
+        
+        return formatted_messages
