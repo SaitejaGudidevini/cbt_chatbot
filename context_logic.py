@@ -564,9 +564,27 @@ class EnhancedConversationManager:
                 user_context = self.knowledge_graph.get_user_context(user_id, entities)
                 
             else:
-                # Chit-Chat Mode: Only read existing memory
-                logger.info(f"Chit-chat Mode: Reading existing memory for user {user_id}")
-                user_context = self.knowledge_graph.get_user_context(user_id)
+                # Chit-Chat Mode: Use LLM intelligence to decide if memory is needed
+                # Check if the LLM client is available and can make this decision
+                should_retrieve = False
+                
+                if hasattr(llm_client, 'should_retrieve_memory'):
+                    try:
+                        should_retrieve = llm_client.should_retrieve_memory(
+                            user_input, 
+                            original_manager.conversation_history
+                        )
+                        logger.info(f"LLM memory decision: {'Retrieve' if should_retrieve else 'Skip'}")
+                    except Exception as e:
+                        logger.warning(f"Memory check failed: {e}")
+                        should_retrieve = False
+                
+                if should_retrieve:
+                    logger.info(f"Chit-chat Mode: LLM determined memory is needed, retrieving context")
+                    user_context = self.knowledge_graph.get_user_context(user_id)
+                else:
+                    logger.info(f"Chit-chat Mode: LLM determined memory not needed")
+                    user_context = ""
             
             if cbt_triggered:
                 logger.info(f"CBT trigger detected by original ML classifier: '{original_manager.trigger_statement}'")

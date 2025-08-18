@@ -14,6 +14,71 @@ class LLMProvider(Enum):
 class OllamaClient:
     """Client for both local Ollama and cloud Groq inference."""
     
+    def should_retrieve_memory(self, user_input: str, conversation_history: list) -> bool:
+        """Use LLM to intelligently determine if memory context is needed"""
+        
+        # Don't retrieve memory for very first message
+        if not conversation_history or len(conversation_history) == 0:
+            return False
+            
+        # Build a simple prompt for the LLM to decide
+        check_prompt = f"""Analyze this user message and determine if retrieving past conversation memory would be helpful.
+
+User message: "{user_input}"
+
+Recent conversation turns: {len(conversation_history)}
+
+Should we retrieve the user's conversation history and memory context for this message?
+- Reply YES if: The user is referencing past conversations, asking about what was discussed before, continuing a previous topic, or the message requires context from earlier interactions
+- Reply NO if: This is a simple greeting, a new topic, a standalone question, or doesn't require past context
+
+Reply with only YES or NO."""
+
+        try:
+            if hasattr(self, 'provider') and self.provider == LLMProvider.GROQ:
+                # Use Groq for quick decision
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.groq_api_key}"
+                }
+                payload = {
+                    "model": self.groq_model,
+                    "messages": [{"role": "system", "content": check_prompt}],
+                    "temperature": 0.1,
+                    "max_tokens": 10
+                }
+                response = requests.post(self.groq_url, json=payload, headers=headers, timeout=5)
+                if response.status_code == 200:
+                    result = response.json()
+                    answer = result["choices"][0]["message"]["content"].strip().upper()
+                    return "YES" in answer
+            elif hasattr(self, 'base_url'):
+                # Use Ollama for quick decision
+                payload = {
+                    "model": getattr(self, 'model_name', 'qwen2.5:14b-instruct'),
+                    "prompt": check_prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.1,
+                        "num_predict": 10
+                    }
+                }
+                response = requests.post(
+                    f"{self.base_url}/api/generate",
+                    json=payload,
+                    timeout=5
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    answer = result.get("response", "").strip().upper()
+                    return "YES" in answer
+                    
+        except Exception as e:
+            logger.warning(f"Memory check failed, defaulting to no memory: {e}")
+            
+        # Default to no memory if check fails
+        return False
+    
     def __init__(self, model_name="qwen2.5:14b-instruct", base_url=None, provider=None):
         # Determine provider
         if provider is None:
